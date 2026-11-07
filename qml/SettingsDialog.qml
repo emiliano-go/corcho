@@ -132,7 +132,15 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.55)
-        MouseArea { anchors.fill: parent; onClicked: root.closed() }
+        MouseArea {
+            id: dismissArea
+            anchors.fill: parent
+            onPressed: function(mouse) {
+                var p = panel.mapFromItem(dismissArea, mouse.x, mouse.y);
+                if (!panel.contains(p))
+                    root.closed();
+            }
+        }
     }
 
     Rectangle {
@@ -224,23 +232,27 @@ Item {
                 width: parent.width - 216
                 height: parent.height
                 spacing: root.th.space3
-                Row {
+                Item {
                     width: parent.width
                     height: 40
 
                     Text {
+                        anchors.left: parent.left
+                        anchors.right: closeButton.left
+                        anchors.rightMargin: root.th.space2
                         anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
                         text: ({ general: "General", interface: "Interface", appearance: "Appearance", data: "Data", ai: "AI", security: "Security", about: "About" })[root.tab]
                         color: root.th.text
                         font.family: root.th.fontFamily
                         font.pixelSize: root.th.fontSizePage
                         font.weight: root.th.fontWeightMedium
                     }
-                    Item { width: parent.width - 70; height: 1 }
                     Item {
                         id: closeButton
                         width: 28
                         height: 28
+                        anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
                         activeFocusOnTab: true
                         Accessible.role: Accessible.Button

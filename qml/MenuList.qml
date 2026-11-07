@@ -14,7 +14,10 @@ Popup {
 
     width: 224
     padding: 8
-    modal: true
+    // Modal popups make the overlay consume tablet events before the pen
+    // catcher below can see them. Keep the dim for the same appearance.
+    modal: false
+    dim: true
     focus: true
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
     property int currentIndex: 0
@@ -83,6 +86,48 @@ Popup {
     Keys.onEscapePressed: {
         if (menu.stack.length > 0) menu.back();
         else menu.close();
+    }
+
+    // Popup.CloseOnPressOutside only tracks mouse and touch, so this
+    // full-window catcher closes the menu when a stylus taps outside it.
+    // It is created directly in the overlay so that it is not culled by
+    // the popup's content positioner while the popup is closed.
+    property Item penCatcher: null
+
+    Component {
+        id: penCatcherComponent
+
+        Item {
+            objectName: "penCatcher"
+            anchors.fill: parent
+            z: menu.z - 1
+
+            TapHandler {
+                acceptedPointerTypes: PointerDevice.Pen | PointerDevice.Eraser
+                // Take the event so it cannot activate the control underneath
+                // and immediately reopen the menu.
+                gesturePolicy: TapHandler.WithinBounds
+                onTapped: menu.close()
+            }
+        }
+    }
+
+    onOpened: {
+        var overlay = Overlay.overlay;
+        if (overlay && !penCatcher)
+            penCatcher = penCatcherComponent.createObject(overlay);
+    }
+
+    onClosed: {
+        if (penCatcher) {
+            penCatcher.destroy();
+            penCatcher = null;
+        }
+    }
+
+    Component.onDestruction: {
+        if (penCatcher)
+            penCatcher.destroy();
     }
 
     function activate(index) {
