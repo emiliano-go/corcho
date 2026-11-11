@@ -45,6 +45,16 @@ fn append_chromium_flags(flags: &str) {
     std::env::set_var(key, value);
 }
 
+fn die_with_parent() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+        if libc::getppid() == 1 {
+            std::process::exit(0);
+        }
+    }
+}
+
 fn main() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         std::env::set_var("RUST_BACKTRACE", "1");
@@ -102,6 +112,7 @@ fn main() {
 
     let http_index = args.iter().position(|a| a == "--mcp-http");
     if let Some(index) = http_index {
+        die_with_parent();
         let addr = args
             .get(index + 1)
             .cloned()
@@ -113,6 +124,7 @@ fn main() {
         return;
     }
     if args.iter().any(|a| a == "--mcp") || std::env::var("CORCHO_MCP").as_deref() == Ok("1") {
+        die_with_parent();
         if let Err(err) = mcp::serve() {
             eprintln!("mcp: {err}");
             std::process::exit(1);
