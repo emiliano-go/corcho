@@ -4,6 +4,7 @@ mod bridge;
 mod clipboard;
 mod core;
 mod deeplink;
+mod gitbackup;
 mod gitcard;
 mod history;
 mod integrations;

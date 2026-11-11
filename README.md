@@ -4,10 +4,6 @@ A native desktop workspace where notes, sites, tasks and calendars share
 one infinite grid. Built with **Rust** and **Qt 6** (Qt Quick and QtWebEngine),
 for Linux. No Electron shell, no telemetry, no analytics.
 
-![Corcho canvas](docs/screenshots/canvas.png)
-
-![Corcho settings](docs/screenshots/settings.png)
-
 ## Features
 
 - Infinite grid with pan, zoom, snapping, a minimap and undo/redo.
@@ -185,6 +181,30 @@ For the shortest setup, use **Pair with words**: the first device uploads the
 encrypted setup code to the relay under a six-word code valid for ten minutes
 and one use, and the second device types that code. The word list is the BIP39
 English list.
+
+Joining a network merges the other device's grids and folders into the local
+workspace instead of replacing them. Grid and folder order are synced as
+ordered ids. A conflicting card is copied into a `<grid-name>-conflict` grid,
+once for each conflicting version, so neither side is lost.
+
+### History and git backup
+
+Every publish appends a dated journal entry to the Iroh document and to
+`~/.local/share/corcho/iroh/history.jsonl`. Journal entries are never deleted,
+so a losing value or an offline edit remains recoverable. Values overwritten
+by a peer are also copied to `backups/iroh-conflict-*.json`.
+
+To push a backup to a git remote every few minutes, point Corcho at a local git
+checkout that already has a remote configured:
+
+```sh
+CORCHO_GIT_BACKUP_REPO=~/corcho-backup CORCHO_GIT_BACKUP_MINUTES=10 corcho
+```
+
+Each run commits `corcho/workspace.json` (settings secrets stripped) and
+`corcho/history.jsonl` and pushes it. The history contains workspace content,
+so use a private repository. `CORCHO_GIT_BACKUP_REMOTE` and
+`CORCHO_GIT_BACKUP_BRANCH` default to `origin` and `main`.
 
 ### Relay
 

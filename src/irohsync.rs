@@ -12,6 +12,7 @@
 //! Iroh endpoint live in a dedicated thread so the Qt thread never blocks.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -1056,6 +1057,7 @@ async fn publish(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::api::Do
 
     let mut plan: Vec<(String, Vec<u8>)> = Vec::new();
     let mut tombstones: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut journal: Option<(String, Record)> = None;
     {
         let state_key = inner.state.lock().unwrap().key.clone();
         let crypto_key = match state_key.as_deref() {
@@ -1128,6 +1130,57 @@ async fn publish(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::api::Do
                 tombstones.push((key, bytes));
             }
         }
+        if !plan.is_empty() || !tombstones.is_empty() {
+            let mut changes = serde_json::Map::new();
+            for (key, _) in &plan {
+                if let Some(value) = records.get(key) {
+                    changes.insert(key.clone(), value.clone());
+                }
+            }
+            for (key, _) in &tombstones {
+                changes.insert(key.clone(), json!({"deleted": true}));
+            }
+            let entry = json!({
+                "at": now(),
+                "direction": "publish",
+                "device": device,
+                "changes": changes,
+            });
+            append_history(&inner.data_dir, &entry);
+            let journal_key = format!("journal/{}-{}-{}", now(), device, state.clock);
+            let record = match &crypto_key {
+                Some(key) => match serde_json::to_vec(&entry)
+                    .map_err(|err| anyhow!("{err}"))
+                    .and_then(|plain| seal_random(key, journal_key.as_bytes(), &plain))
+                {
+                    Ok(sealed) => Record {
+                        v: SCHEMA,
+                        device: device.clone(),
+                        clock: state.clock,
+                        deleted: false,
+                        value: None,
+                        sealed: Some(sealed),
+                    },
+                    Err(_) => Record {
+                        v: SCHEMA,
+                        device: device.clone(),
+                        clock: state.clock,
+                        deleted: false,
+                        value: Some(entry),
+                        sealed: None,
+                    },
+                },
+                None => Record {
+                    v: SCHEMA,
+                    device: device.clone(),
+                    clock: state.clock,
+                    deleted: false,
+                    value: Some(entry),
+                    sealed: None,
+                },
+            };
+            journal = Some((journal_key, record));
+        }
     }
 
     let mut applied_keys: Vec<String> = Vec::new();
@@ -1147,6 +1200,11 @@ async fn publish(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::api::Do
             .is_ok()
         {
             applied_keys.push(key);
+        }
+    }
+    if let Some((journal_key, record)) = journal {
+        if let Ok(bytes) = serde_json::to_vec(&record) {
+            let _ = doc.set_bytes(network.author, journal_key, bytes).await;
         }
     }
 
@@ -1218,6 +1276,9 @@ async fn pull_and_apply(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::
     };
     let mut decrypted: HashMap<String, (Record, String)> = HashMap::new();
     for (key, (mut record, _hash)) in latest {
+        if key.starts_with("journal/") {
+            continue;
+        }
         if record.sealed.is_some() {
             let Some(crypto_key) = crypto_key.as_ref() else {
                 set_error(
@@ -1468,11 +1529,23 @@ pub fn split_workspace(ws: &Workspace) -> BTreeMap<String, Value> {
         }
     }
     records.insert("settings".into(), syncable_settings(&ws.settings));
+    records.insert(
+        "grid-order".into(),
+        json!(ws.grids.iter().map(|grid| &grid.id).collect::<Vec<_>>()),
+    );
+    records.insert(
+        "folder-order".into(),
+        json!(ws
+            .folders
+            .iter()
+            .map(|folder| &folder.id)
+            .collect::<Vec<_>>()),
+    );
     records.insert("sync/fingerprint".into(), json!({"fp": sync_fingerprint()}));
     records
 }
 
-fn syncable_settings(settings: &Settings) -> Value {
+pub(crate) fn syncable_settings(settings: &Settings) -> Value {
     let mut value = serde_json::to_value(settings).unwrap_or_else(|_| json!({}));
     if let Some(object) = value.as_object_mut() {
         for key in [
@@ -1517,12 +1590,30 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
 
     let mut changed = false;
     let before = value_hash(&serde_json::to_value(&*ws).unwrap_or(Value::Null));
+    let mut grid_order: Option<Vec<String>> = None;
+    let mut folder_order: Option<Vec<String>> = None;
 
     for (key, record) in ordered {
         if record.v > SCHEMA {
             continue;
         }
         let deleted = record.deleted || record.value.is_none();
+        if key == "grid-order" || key == "folder-order" {
+            if !deleted {
+                if let Some(ids) = record.value.as_ref().and_then(|value| value.as_array()) {
+                    let ids = ids
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect::<Vec<_>>();
+                    if key == "grid-order" {
+                        grid_order = Some(ids);
+                    } else {
+                        folder_order = Some(ids);
+                    }
+                }
+            }
+            continue;
+        }
         if key == "settings" {
             if let Some(mut value) = record.value.clone() {
                 if !deleted {
@@ -1673,6 +1764,15 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
         }
     }
 
+    if let Some(ids) = grid_order {
+        reorder_by_ids(&mut ws.grids, &ids, |grid| grid.id.as_str());
+        changed = true;
+    }
+    if let Some(ids) = folder_order {
+        reorder_by_ids(&mut ws.folders, &ids, |folder| folder.id.as_str());
+        changed = true;
+    }
+
     if ws.active_grid_id.is_none()
         || !ws
             .active_grid_id
@@ -1685,6 +1785,17 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
 
     let after = value_hash(&serde_json::to_value(&*ws).unwrap_or(Value::Null));
     changed || before != after
+}
+
+fn reorder_by_ids<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str) {
+    let mut ordered = Vec::with_capacity(items.len());
+    for id in ids {
+        if let Some(position) = items.iter().position(|item| id_of(item) == id.as_str()) {
+            ordered.push(items.remove(position));
+        }
+    }
+    ordered.append(items);
+    *items = ordered;
 }
 
 fn record_order(key: &str) -> u8 {
@@ -1740,6 +1851,48 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn append_history(data_dir: &Path, entry: &Value) {
+    let dir = data_dir.join("iroh");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("history.jsonl");
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    let _ = writeln!(file, "{}", entry);
+}
+
+pub fn backup_conflict(data_dir: &Path, key: &str, local: &Value, remote: &Value) {
+    let dir = crate::storage::backups_dir(data_dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let safe: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let path = dir.join(format!("iroh-conflict-{}-{safe}.json", now()));
+    let entry = json!({
+        "at": now(),
+        "key": key,
+        "local": local,
+        "remote": remote,
+    });
+    if let Ok(bytes) = serde_json::to_vec_pretty(&entry) {
+        let _ = write_private(&path, &bytes);
+    }
 }
 
 fn set_error(inner: &Arc<Inner>, message: String) {
@@ -2228,6 +2381,100 @@ mod tests {
             attachment_nonce(&key, "a.png", b"data"),
             attachment_nonce(&key, "b.png", b"data")
         );
+    }
+
+    #[test]
+    fn grid_and_folder_order_round_trips() {
+        use crate::model::{Folder, Grid};
+        let mut ws = Workspace {
+            grids: vec![
+                Grid {
+                    id: "g1".into(),
+                    name: "One".into(),
+                    ..Default::default()
+                },
+                Grid {
+                    id: "g2".into(),
+                    name: "Two".into(),
+                    ..Default::default()
+                },
+                Grid {
+                    id: "g3".into(),
+                    name: "Three".into(),
+                    ..Default::default()
+                },
+            ],
+            folders: vec![
+                Folder {
+                    id: "f1".into(),
+                    name: "F1".into(),
+                    collapsed: false,
+                },
+                Folder {
+                    id: "f2".into(),
+                    name: "F2".into(),
+                    collapsed: false,
+                },
+            ],
+            ..Default::default()
+        };
+        ws.grids.swap(0, 2);
+        ws.folders.swap(0, 1);
+        let records = split_workspace(&ws)
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    Record {
+                        v: SCHEMA,
+                        device: "dev".into(),
+                        clock: 1,
+                        deleted: false,
+                        value: Some(value),
+                        sealed: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut target = Workspace::default();
+        target.grids.clear();
+        target.folders.clear();
+        assert!(apply_records(&mut target, &records));
+        assert_eq!(
+            target
+                .grids
+                .iter()
+                .map(|g| g.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g3", "g2", "g1"]
+        );
+        assert_eq!(
+            target
+                .folders
+                .iter()
+                .map(|f| f.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["f2", "f1"]
+        );
+    }
+
+    #[test]
+    fn local_history_and_conflict_backup_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        append_history(dir.path(), &json!({"at": "now", "value": 1}));
+        let history = dir.path().join("iroh/history.jsonl");
+        let text = std::fs::read_to_string(history).unwrap();
+        assert!(text.contains(r#""value":1"#));
+        backup_conflict(
+            dir.path(),
+            "card/a",
+            &json!({"title": "local"}),
+            &json!({"title": "remote"}),
+        );
+        let backups = std::fs::read_dir(crate::storage::backups_dir(dir.path()))
+            .unwrap()
+            .count();
+        assert_eq!(backups, 1);
     }
 
     #[test]

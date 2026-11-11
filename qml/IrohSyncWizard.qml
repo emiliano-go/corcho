@@ -55,6 +55,8 @@ Item {
         accessError = "";
         accessSaved = "";
         opened = true;
+        if (root.status.savedWorkspace && !root.status.enabled)
+            root.enableSync();
     }
 
     function close() {
@@ -64,6 +66,21 @@ Item {
 
     function setSetting(key, value) {
         root.app.setSetting(key, JSON.stringify(value));
+    }
+
+    function enableSync() {
+        root.setSetting("iroh_sync_enabled", true);
+        root.app.refresh();
+    }
+
+    function enterShare() {
+        root.mode = "share";
+        root.errorText = "";
+        root.copyWords();
+        if (root.errorText !== "") {
+            root.errorText = "";
+            root.copySetup();
+        }
     }
 
     function looksLikeWords(text) {
@@ -102,7 +119,8 @@ Item {
         }
         root.setSetting("iroh_sync_enabled", true);
         root.app.refresh();
-        mode = "share";
+        root.app.irohSyncNow();
+        root.enterShare();
     }
 
     function joinNetwork() {
@@ -133,7 +151,8 @@ Item {
         }
         root.setSetting("iroh_sync_enabled", true);
         root.app.refresh();
-        mode = "share";
+        root.app.irohSyncNow();
+        root.enterShare();
     }
 
     function copyWords() {
@@ -353,11 +372,19 @@ Item {
                     AppButton {
                         width: parent.width
                         th: root.th
-                        text: root.configured ? "Invite a device" : "Create a network"
+                        visible: root.configured && !root.status.enabled
+                        text: "Enable sync"
                         variant: "solid"
+                        onClicked: root.enableSync()
+                    }
+                    AppButton {
+                        width: parent.width
+                        th: root.th
+                        text: root.configured ? "Invite a device" : "Create a network"
+                        variant: root.configured && !root.status.enabled ? "ghost" : "solid"
                         onClicked: {
                             if (root.configured)
-                                root.mode = "share";
+                                root.enterShare();
                             else
                                 root.mode = "create";
                         }

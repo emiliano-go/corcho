@@ -90,6 +90,9 @@ impl Core {
         };
         core.adblock.set_enabled(core.ws.settings.ad_blocker);
         core.adblock.load_lists(&core.data_dir);
+        if networking {
+            crate::gitbackup::start(core.data_dir.clone());
+        }
         Ok(core)
     }
 
@@ -135,20 +138,56 @@ impl Core {
 
     /// Apply a batch of records from a peer and persist the result.
     pub fn apply_remote(&mut self, records: Vec<(String, crate::irohsync::Record)>) -> bool {
-        // A fresh install joining an existing workspace should adopt the
-        // remote grids instead of also publishing its untouched default grid.
-        if records.iter().any(|(key, _)| key.starts_with("grid/")) && is_pristine(&self.ws) {
-            self.ws.grids.clear();
-            self.ws.folders.clear();
-            self.ws.calendars.clear();
-            self.ws.templates.clear();
-            self.ws.date_links.clear();
+        if records.is_empty() {
+            return false;
+        }
+        snapshot_before_remote(&self.data_dir, &self.ws);
+        let local = crate::irohsync::split_workspace(&self.ws);
+        let grid_names: std::collections::HashMap<String, String> = self
+            .ws
+            .grids
+            .iter()
+            .map(|grid| (grid.id.clone(), grid.name.clone()))
+            .collect();
+        let mut conflicts: Vec<(String, Value, Value)> = Vec::new();
+        for (key, record) in &records {
+            if record.deleted
+                || !key.starts_with("card/")
+                || key == "settings"
+                || key.starts_with("sync/")
+                || key.starts_with("attachment/")
+            {
+                continue;
+            }
+            let Some(remote) = &record.value else {
+                continue;
+            };
+            let Some(value) = local.get(key) else {
+                continue;
+            };
+            if value == remote {
+                continue;
+            }
+            crate::irohsync::backup_conflict(&self.data_dir, key, value, remote);
+            let grid_id = remote
+                .get("grid")
+                .and_then(|value| value.as_str())
+                .or_else(|| value.get("grid").and_then(|value| value.as_str()))
+                .unwrap_or_default()
+                .to_string();
+            if !grid_id.is_empty() {
+                conflicts.push((grid_id, value.clone(), remote.clone()));
+            }
+        }
+        if !conflicts.is_empty() {
+            add_conflict_cards(&mut self.ws, &grid_names, &conflicts);
         }
         let changed = crate::irohsync::apply_records(&mut self.ws, &records);
-        if changed {
+        if changed || !conflicts.is_empty() {
             let _ = self.save_remote();
+            self.iroh.mark_dirty();
         }
-        changed
+        changed || !conflicts.is_empty()
     }
 
     pub fn reload_from_disk(&mut self) -> Result<()> {
@@ -1741,17 +1780,120 @@ impl Drop for Core {
     }
 }
 
-fn is_pristine(ws: &crate::model::Workspace) -> bool {
-    ws.grids.iter().all(|g| g.cards.is_empty())
-        && ws.folders.is_empty()
-        && ws.templates.is_empty()
-        && ws.date_links.is_empty()
-        && ws.grids.len() <= 1
+fn snapshot_before_remote(data_dir: &std::path::Path, ws: &Workspace) {
+    let dir = storage::backups_dir(data_dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let stamp = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let path = dir.join(format!("iroh-before-remote-{stamp}.json"));
+    if let Ok(bytes) = serde_json::to_vec_pretty(ws) {
+        let _ = std::fs::write(&path, bytes);
+    }
+    let mut snapshots: Vec<_> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("iroh-before-remote-")
+        })
+        .collect();
+    snapshots.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
+    while snapshots.len() > 20 {
+        if let Some(entry) = snapshots.first() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+        snapshots.remove(0);
+    }
+}
+
+fn add_conflict_cards(
+    ws: &mut Workspace,
+    grid_names: &std::collections::HashMap<String, String>,
+    conflicts: &[(String, Value, Value)],
+) {
+    for (grid_id, local, remote) in conflicts {
+        let name = grid_names
+            .get(grid_id)
+            .cloned()
+            .unwrap_or_else(|| "Conflicts".into());
+        let conflict_name = if name.ends_with("-conflict") {
+            name
+        } else {
+            format!("{name}-conflict")
+        };
+        let conflict_id = format!("{grid_id}-conflict");
+        let index = match ws
+            .grids
+            .iter()
+            .position(|grid| grid.id == conflict_id || grid.name == conflict_name)
+        {
+            Some(index) => index,
+            None => {
+                ws.grids.push(Grid {
+                    id: conflict_id,
+                    name: conflict_name,
+                    icon: "layout-grid".into(),
+                    ..Default::default()
+                });
+                ws.grids.len() - 1
+            }
+        };
+        let grid = &mut ws.grids[index];
+        let mut slot = grid.cards.len();
+        for (value, label) in [(local, "local"), (remote, "remote")] {
+            let Some(card_value) = value.get("card") else {
+                continue;
+            };
+            let Ok(mut card) = serde_json::from_value::<Card>(card_value.clone()) else {
+                continue;
+            };
+            card.id = uuid::Uuid::new_v4().to_string();
+            card.x = 64.0 + (slot % 3) as f64 * (card.width + 32.0);
+            card.y = 64.0 + (slot / 3) as f64 * (card.height + 32.0);
+            slot += 1;
+            let title = if card.title.is_empty() {
+                card.kind.clone()
+            } else {
+                card.title.clone()
+            };
+            card.title = format!("{title} ({label})");
+            grid.cards.push(card);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicting_cards_are_copied_into_a_conflict_grid() {
+        let mut ws = crate::model::Workspace::default();
+        let grid_id = ws.grids[0].id.clone();
+        let mut names = std::collections::HashMap::new();
+        names.insert(grid_id.clone(), ws.grids[0].name.clone());
+        let mut local = Card::new("note", 10.0, 10.0);
+        local.title = "local".into();
+        let mut remote = local.clone();
+        remote.id = uuid::Uuid::new_v4().to_string();
+        remote.title = "remote".into();
+        let conflicts = vec![(
+            grid_id,
+            json!({"grid": ws.grids[0].id, "card": local}),
+            json!({"grid": ws.grids[0].id, "card": remote}),
+        )];
+        add_conflict_cards(&mut ws, &names, &conflicts);
+        let conflict = ws
+            .grids
+            .iter()
+            .find(|grid| grid.name.ends_with("-conflict"))
+            .expect("conflict grid");
+        assert_eq!(conflict.cards.len(), 2);
+    }
 
     #[test]
     fn folder_listing_includes_unsupported_files() {
