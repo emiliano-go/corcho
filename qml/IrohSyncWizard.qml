@@ -76,9 +76,23 @@ Item {
         return words === 6;
     }
 
+    function applyRelay() {
+        var next = root.relayText.trim();
+        if (next === root.app.irohRelayUrl())
+            return true;
+        var error = root.app.irohSetRelay(next);
+        if (error !== "") {
+            errorText = error;
+            return false;
+        }
+        return true;
+    }
+
     function createNetwork() {
         errorText = "";
         note = "";
+        if (!root.applyRelay())
+            return;
         busy = true;
         var ticket = root.app.irohCreate();
         busy = false;
@@ -99,6 +113,8 @@ Item {
             errorText = "Enter the six words or the setup code.";
             return;
         }
+        if (!root.applyRelay())
+            return;
         busy = true;
         if (looksLikeWords(value)) {
             var error = root.app.irohPairJoin(value);
@@ -343,7 +359,7 @@ Item {
                             if (root.configured)
                                 root.mode = "share";
                             else
-                                root.createNetwork();
+                                root.mode = "create";
                         }
                     }
                     AppButton {
@@ -351,6 +367,66 @@ Item {
                         th: root.th
                         text: root.configured ? "Join a different network" : "Join a network"
                         onClicked: root.mode = "join"
+                    }
+                }
+
+                Column {
+                    width: parent.width
+                    spacing: root.th.space2
+                    visible: root.mode === "create"
+
+                    Text {
+                        width: parent.width
+                        text: "Create a network"
+                        color: root.th.text
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeBody
+                        font.weight: root.th.fontWeightMedium
+                    }
+                    Text {
+                        width: parent.width
+                        text: "Every device in this network must use the same relay."
+                        color: root.th.text2
+                        wrapMode: Text.WordWrap
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeSmall
+                    }
+                    Text {
+                        text: "Relay endpoint"
+                        color: root.th.text2
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeSmall
+                    }
+                    AppTextField {
+                        width: parent.width
+                        th: root.th
+                        text: root.relayText
+                        placeholder: "https://relay.example.com"
+                        onEdited: function (value) { root.relayText = value; }
+                        onAccepted: root.createNetwork()
+                    }
+                    Text {
+                        width: parent.width
+                        text: "Leave empty for the public n0 relays."
+                        color: root.th.muted
+                        wrapMode: Text.WordWrap
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeCaption
+                    }
+                    Row {
+                        spacing: root.th.space2
+                        AppButton {
+                            th: root.th
+                            text: root.busy ? "Creating…" : "Create"
+                            variant: "solid"
+                            enabledButton: !root.busy
+                            onClicked: root.createNetwork()
+                        }
+                        AppButton {
+                            th: root.th
+                            text: "Back"
+                            onClicked: root.mode = "home"
+                        }
                     }
                 }
 
@@ -366,6 +442,20 @@ Item {
                         wrapMode: Text.WordWrap
                         font.family: root.th.fontFamily
                         font.pixelSize: root.th.fontSizeBody
+                    }
+
+                    Text {
+                        text: "Relay endpoint"
+                        color: root.th.text2
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeSmall
+                    }
+                    AppTextField {
+                        width: parent.width
+                        th: root.th
+                        text: root.relayText
+                        placeholder: "https://relay.example.com"
+                        onEdited: function (value) { root.relayText = value; }
                     }
 
                     Rectangle {
