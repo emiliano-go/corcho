@@ -87,8 +87,15 @@ limits, is in [PLAN.md](PLAN.md).
 
 ## Install
 
-The build is a single binary plus a desktop entry and icon. To install for the
-current user:
+The build is a single binary plus a desktop entry and icon. To build and
+install for the current user:
+
+```sh
+./install.sh
+```
+
+Use `./install.sh --no-build` to install an existing release binary. The
+manual steps are:
 
 ```sh
 install -m755 target/release/corcho ~/.local/bin/corcho
