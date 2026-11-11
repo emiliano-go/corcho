@@ -352,6 +352,10 @@ impl IrohSync {
             "lastSync": status.last_sync,
             "lastError": status.last_error,
             "pending": status.pending,
+            "savedWorkspace": state
+                .as_ref()
+                .map(|s| s.write_ticket.is_some() || s.read_ticket.is_some())
+                .unwrap_or(false),
             "remoteAttachments": state.as_ref().map(|s| s.attachments.len()).unwrap_or(0),
         })
         .to_string()
@@ -514,11 +518,26 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
                 include_key,
                 reply,
             }) => {
-                let result = match &doc {
-                    Some(doc) => runtime
-                        .block_on(share_document(&inner, doc, read_only, include_key))
-                        .map_err(|e| anyhow!("{e}")),
-                    None => Err(anyhow!("no Iroh workspace configured")),
+                let result = if let Some(current) = doc.clone() {
+                    runtime
+                        .block_on(share_document(&inner, &current, read_only, include_key))
+                        .map_err(|e| anyhow!("{e}"))
+                } else {
+                    match runtime.block_on(open_document(&inner, &network)) {
+                        Ok(Some(opened)) => {
+                            doc = Some(opened.clone());
+                            start_subscription(
+                                inner.clone(),
+                                opened.clone(),
+                                runtime.handle().clone(),
+                            );
+                            runtime
+                                .block_on(share_document(&inner, &opened, read_only, include_key))
+                                .map_err(|e| anyhow!("{e}"))
+                        }
+                        Ok(None) => Err(anyhow!("no Iroh workspace configured")),
+                        Err(err) => Err(err),
+                    }
                 };
                 let _ = reply.send(result);
             }
