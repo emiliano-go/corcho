@@ -1,0 +1,72 @@
+services:
+  iroh-relay:
+    image: n0computer/iroh-relay:v1.4.1
+    container_name: iroh-relay
+    restart: unless-stopped
+    command: ["--config-path", "/config.toml"]
+    user: "65534:65534"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./config.toml:/config.toml:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.iroh-relay.rule=Host(`${RELAY_DOMAIN}`) && !PathPrefix(`/access`)"
+      - "traefik.http.routers.iroh-relay.entrypoints=websecure"
+      - "traefik.http.routers.iroh-relay.tls.certresolver=le"
+      - "traefik.http.services.iroh-relay.loadbalancer.server.port=8080"
+      - "com.centurylinklabs.watchtower.enable=false"
+    networks:
+      - traefik_net
+
+  access:
+    image: python:3.13-alpine
+    container_name: iroh-relay-access
+    restart: unless-stopped
+    command: ["python", "/app/access.py"]
+    user: "${ACCESS_UID:-1000}:${ACCESS_GID:-1000}"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=8m
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./access.py:/app/access.py:ro
+      - ./state:/state
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.iroh-relay-access.rule=Host(`${RELAY_DOMAIN}`) && PathPrefix(`/access`)"
+      - "traefik.http.routers.iroh-relay-access.priority=100"
+      - "traefik.http.routers.iroh-relay-access.entrypoints=websecure"
+      - "traefik.http.routers.iroh-relay-access.tls.certresolver=le"
+      - "traefik.http.services.iroh-relay-access.loadbalancer.server.port=8090"
+      - "com.centurylinklabs.watchtower.enable=false"
+    networks:
+      - traefik_net
+
+networks:
+  traefik_net:
+    external: true

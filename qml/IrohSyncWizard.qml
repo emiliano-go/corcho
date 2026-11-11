@@ -10,6 +10,11 @@ Item {
     property string ticket: ""
     property string shownTicket: ""
     property string errorText: ""
+    property string relayText: ""
+    property string relayError: ""
+    property string relaySaved: ""
+    property string accessError: ""
+    property string accessSaved: ""
 
     signal closed()
 
@@ -33,6 +38,11 @@ Item {
         ticket = "";
         shownTicket = "";
         errorText = "";
+        relayText = root.app.irohRelayUrl();
+        relayError = "";
+        relaySaved = "";
+        accessError = "";
+        accessSaved = "";
         opened = true;
     }
 
@@ -82,6 +92,94 @@ Item {
         shownTicket = value;
     }
 
+    function copyCacheTicket() {
+        errorText = "";
+        var value = root.app.irohCacheTicket();
+        if (value === "") {
+            errorText = "No cache ticket is available.";
+            return;
+        }
+        root.app.copyText(value);
+    }
+
+    function saveRelay() {
+        relayError = "";
+        relaySaved = "";
+        var value = root.app.irohSetRelay(relayText.trim());
+        if (value !== "") {
+            relayError = value;
+            return;
+        }
+        relaySaved = "Relay saved and sync restarted.";
+        root.app.refresh();
+    }
+
+    function relayBase() {
+        return root.relayText.trim().replace(/\/+$/, "");
+    }
+
+    function requestAccess() {
+        accessError = "";
+        accessSaved = "";
+        var base = root.relayBase();
+        var id = root.status.endpointId || "";
+        if (base === "") {
+            accessError = "Set a relay endpoint first.";
+            return;
+        }
+        if (id === "") {
+            accessError = "The device ID is not ready yet.";
+            return;
+        }
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", base + "/access/request", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== XMLHttpRequest.DONE)
+                return;
+            if (xhr.status === 200 || xhr.status === 202) {
+                var state = "pending";
+                try { state = JSON.parse(xhr.responseText).status || state; } catch (e) {}
+                accessSaved = state === "approved"
+                    ? "This device is already approved."
+                    : "Access requested. The relay operator must approve this device.";
+            } else {
+                accessError = "Request failed (" + xhr.status + "). Send your device ID to the operator.";
+            }
+        };
+        xhr.send(JSON.stringify({ endpointId: id }));
+    }
+
+    function checkAccess() {
+        accessError = "";
+        accessSaved = "";
+        var base = root.relayBase();
+        var id = root.status.endpointId || "";
+        if (base === "" || id === "") {
+            accessError = "Set a relay endpoint first.";
+            return;
+        }
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", base + "/access/status?id=" + encodeURIComponent(id), true);
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== XMLHttpRequest.DONE)
+                return;
+            if (xhr.status !== 200) {
+                accessError = "Could not check access (" + xhr.status + ").";
+                return;
+            }
+            var state = "unknown";
+            try { state = JSON.parse(xhr.responseText).status || state; } catch (e) {}
+            if (state === "approved")
+                accessSaved = "This device is approved.";
+            else if (state === "pending")
+                accessSaved = "Waiting for the relay operator to approve this device.";
+            else
+                accessError = "No access request found for this device.";
+        };
+        xhr.send();
+    }
+
     Rectangle {
         anchors.fill: parent
         color: Qt.rgba(0, 0, 0, 0.55)
@@ -107,10 +205,19 @@ Item {
 
         MouseArea { anchors.fill: parent }
 
-        Column {
+        Flickable {
+            id: flick
             anchors.fill: parent
             anchors.margins: root.th.space5
-            spacing: root.th.space4
+            contentWidth: width
+            contentHeight: body.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+                id: body
+                width: flick.width
+                spacing: root.th.space4
 
             Item {
                 width: parent.width
@@ -145,6 +252,137 @@ Item {
                 lineHeight: root.th.lineHeightNormal
             }
 
+            Column {
+                width: parent.width
+                spacing: root.th.space2
+
+                Text {
+                    text: "Relay endpoint (optional)"
+                    color: root.th.text2
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                Row {
+                    width: parent.width
+                    spacing: root.th.space2
+                    AppTextField {
+                        width: parent.width - saveRelay.width - root.th.space2
+                        th: root.th
+                        text: root.relayText
+                        placeholder: "https://relay.example.com"
+                        onEdited: function (value) { root.relayText = value; }
+                        onAccepted: root.saveRelay()
+                    }
+                    AppButton {
+                        id: saveRelay
+                        th: root.th
+                        text: "Save"
+                        onClicked: root.saveRelay()
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: "Leave empty for the public n0 relays. Other iroh apps can use the same endpoint."
+                    color: root.th.muted
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeCaption
+                }
+                Text {
+                    width: parent.width
+                    text: "Active relay: " + (root.status.relay ? root.status.relay : "n0 public relays")
+                    color: root.th.muted
+                    wrapMode: Text.WrapAnywhere
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeCaption
+                }
+                Text {
+                    width: parent.width
+                    text: root.relayError
+                    visible: root.relayError !== ""
+                    color: root.th.danger
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                Text {
+                    width: parent.width
+                    text: root.relaySaved
+                    visible: root.relaySaved !== ""
+                    color: root.th.success
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+            }
+
+            Column {
+                width: parent.width
+                spacing: root.th.space2
+                visible: root.status.endpointId !== undefined && root.status.endpointId !== null
+
+                Text {
+                    text: "This device ID (for a relay allowlist)"
+                    color: root.th.text2
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                Row {
+                    width: parent.width
+                    spacing: root.th.space2
+                    TextEdit {
+                        width: parent.width - copyDeviceId.width - root.th.space2
+                        height: 34
+                        text: root.status.endpointId || ""
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextEdit.WrapAnywhere
+                        clip: true
+                        color: root.th.text
+                        font.family: root.th.fontMono
+                        font.pixelSize: root.th.fontSizeCaption
+                    }
+                    AppButton {
+                        id: copyDeviceId
+                        th: root.th
+                        text: "Copy"
+                        onClicked: root.app.copyText(root.status.endpointId)
+                    }
+                }
+                Row {
+                    spacing: root.th.space2
+                    AppButton {
+                        th: root.th
+                        text: "Request access"
+                        variant: "solid"
+                        onClicked: root.requestAccess()
+                    }
+                    AppButton {
+                        th: root.th
+                        text: "Check access"
+                        onClicked: root.checkAccess()
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: root.accessError
+                    visible: root.accessError !== ""
+                    color: root.th.danger
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                Text {
+                    width: parent.width
+                    text: root.accessSaved
+                    visible: root.accessSaved !== ""
+                    color: root.th.success
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+            }
+
             Row {
                 width: parent.width
                 spacing: root.th.space2
@@ -156,7 +394,7 @@ Item {
                 }
                 AppButton {
                     th: root.th
-                    text: "Join with a ticket"
+                    text: "Join with a setup code"
                     variant: root.mode === "join" ? "solid" : "ghost"
                     onClicked: root.mode = "join"
                 }
@@ -167,7 +405,7 @@ Item {
                 spacing: root.th.space2
                 visible: root.mode === "join"
                 Text {
-                    text: "Ticket"
+                    text: "Setup code"
                     color: root.th.text2
                     font.family: root.th.fontFamily
                     font.pixelSize: root.th.fontSizeSmall
@@ -176,7 +414,7 @@ Item {
                     width: parent.width
                     th: root.th
                     text: root.ticket
-                    placeholder: "Paste the ticket from your other device"
+                    placeholder: "Paste the setup code from your other device"
                     onEdited: function (value) { root.ticket = value; }
                 }
                 Row {
@@ -203,7 +441,7 @@ Item {
                 visible: root.shownTicket !== ""
                 Text {
                     width: parent.width
-                    text: "Share ticket (treat it like a password)"
+                    text: "Setup code (includes the encryption key; treat it like a password)"
                     color: root.th.text2
                     wrapMode: Text.WordWrap
                     font.family: root.th.fontFamily
@@ -231,14 +469,28 @@ Item {
                     }
                     AppButton {
                         th: root.th
-                        text: "Show write ticket"
+                        text: "Show write setup code"
                         onClicked: root.showTicket(false)
                     }
                     AppButton {
                         th: root.th
-                        text: "Show read ticket"
+                        text: "Show read setup code"
                         onClicked: root.showTicket(true)
                     }
+                    AppButton {
+                        th: root.th
+                        text: "Copy cache ticket"
+                        onClicked: root.copyCacheTicket()
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: "Cache tickets are read-only and omit the encryption key, for a relay-side cache. "
+                          + "Enforce the relay allowlist so only cache peers receive one."
+                    color: root.th.muted
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeCaption
                 }
             }
 
@@ -262,6 +514,17 @@ Item {
                         ? (root.status.peers + " peer(s) connected")
                         : (root.status.namespace ? "Waiting for peers" : "Not configured"))
                 color: root.status.lastError ? root.th.danger : root.th.muted
+                wrapMode: Text.WordWrap
+                font.family: root.th.fontFamily
+                font.pixelSize: root.th.fontSizeCaption
+            }
+
+            Text {
+                width: parent.width
+                text: root.status.encrypted
+                    ? "End-to-end encryption: on. Relays and caches only see ciphertext."
+                    : "End-to-end encryption: off (legacy setup code)."
+                color: root.status.encrypted ? root.th.success : root.th.muted
                 wrapMode: Text.WordWrap
                 font.family: root.th.fontFamily
                 font.pixelSize: root.th.fontSizeCaption
@@ -293,6 +556,7 @@ Item {
                     variant: "solid"
                     onClicked: root.close()
                 }
+            }
             }
         }
     }

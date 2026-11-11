@@ -42,3 +42,15 @@ xdg-mime default corcho.desktop x-scheme-handler/corcho
 ```
 
 Deep links: `corcho://grid/<id>` and `corcho://card/<id>`.
+
+## Private relay
+
+[`iroh-relay/`](iroh-relay/) contains a hardened generic `iroh-relay` behind an
+existing Traefik instance, plus a small access-request service. Users request
+access from the peer-sync wizard; the operator approves endpoint IDs over SSH.
+
+## Encrypted 48h cache
+
+[`iroh-cache/`](iroh-cache/) builds a container image of the read-only sync
+daemon and runs it with `--ttl-hours 48` and a cache ticket. The cache only
+holds ciphertext.

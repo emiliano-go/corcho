@@ -421,6 +421,18 @@ pub mod qobject {
         fn iroh_sync_now(self: Pin<&mut Self>);
 
         #[qinvokable]
+        #[cxx_name = "irohRelayUrl"]
+        fn iroh_relay_url(self: &Self) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "irohSetRelay"]
+        fn iroh_set_relay(self: Pin<&mut Self>, url: &QString) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "irohCacheTicket"]
+        fn iroh_cache_ticket(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
         #[cxx_name = "irohLeave"]
         fn iroh_leave(self: Pin<&mut Self>) -> QString;
 
@@ -1892,6 +1904,17 @@ impl qobject::AppController {
         }
     }
 
+    pub fn iroh_cache_ticket(mut self: Pin<&mut Self>) -> QString {
+        let iroh = self.as_ref().rust().core.lock().unwrap().iroh.clone();
+        match iroh.cache_ticket() {
+            Ok(ticket) => s(ticket),
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                s("")
+            }
+        }
+    }
+
     pub fn iroh_leave(mut self: Pin<&mut Self>) -> QString {
         let iroh = self.as_ref().rust().core.lock().unwrap().iroh.clone();
         match iroh.leave() {
@@ -1899,6 +1922,27 @@ impl qobject::AppController {
             Err(err) => {
                 self.as_mut().notice(s("sync-error"), s(err.to_string()));
                 s("")
+            }
+        }
+    }
+
+    pub fn iroh_relay_url(&self) -> QString {
+        s(crate::irohsync::relay_url())
+    }
+
+    pub fn iroh_set_relay(mut self: Pin<&mut Self>, url: &QString) -> QString {
+        if let Err(err) = crate::irohsync::set_relay_url(&p(url)) {
+            return s(err.to_string());
+        }
+        let iroh = self.as_ref().rust().core.lock().unwrap().iroh.clone();
+        match iroh.reload_relay() {
+            Ok(_) => {
+                self.as_mut().refresh_all();
+                s("")
+            }
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                s(err.to_string())
             }
         }
     }

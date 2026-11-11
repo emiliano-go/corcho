@@ -203,10 +203,11 @@ API keys are write-only: `settings.get` redacts them; logs never include them.
 | `sync.now` | - |
 | `sync.configure` | `enabled`, `provider` (`folder`\|`gdrive`), `folder?` |
 | `gdrive.connect` / `gdrive.disconnect` | PKCE flow (browser) |
-| `iroh.status` | enabled, namespace, endpoint id, peers, last sync, last error |
-| `iroh.create` | create a shared workspace and return its write ticket |
-| `iroh.join` | `ticket` |
-| `iroh.share` | `readOnly` (`false` returns the write ticket) |
+| `iroh.status` | enabled, namespace, endpoint id, relay, encryption, peers, last sync, last error |
+| `iroh.create` | create an encrypted shared workspace and return its write setup code |
+| `iroh.join` | `ticket` (a raw ticket or a Corcho setup code) |
+| `iroh.share` | `readOnly` (`false` returns the write setup code) |
+| `iroh.cache` | read-only cache ticket without the encryption key |
 | `iroh.sync` | publish local changes and pull remote ones |
 | `iroh.leave` | leave the shared workspace on this device |
 | `iroh.peers` | connected peers |

@@ -166,7 +166,16 @@ corcho --sync-daemon --ticket <read-ticket>   --data-dir ~/.local/share/corcho
 The daemon stores every replicated record and attachment but never writes, so
 a new device can sync while all your writer devices are offline. A systemd
 unit example lives in `packaging/corcho-syncd.service`. Relays only provide
-connectivity; they are not a durable copy.
+connectivity; they are not a durable copy. Add `--ttl-hours 48` to make the
+daemon a rolling cache: it drops its document and blob stores when the timer
+expires and the supervisor restarts it. Give the cache a **cache ticket**
+(the wizard's *Copy cache ticket* button), which is read-only and omits the
+workspace key, so the cache only ever holds ciphertext.
+
+Workspaces created by this version use end-to-end encryption: record values
+and attachments are sealed with a per-workspace key before they are published.
+The setup code carries that key, so treat it like a password. A cache ticket
+does not.
 
 ### Relay
 
@@ -180,10 +189,15 @@ CORCHO_IROH_RELAY=https://relay.example.com
 ```
 
 An unreadable file or a non-empty setting with no valid URL fails startup
-rather than silently falling back to n0. Self-hosted relays can restrict access
-to a list of endpoint IDs; each device's `iroh.status` reports its
-`endpointId`, and `corcho --print-endpoint-id [--data-dir PATH]` prints it
-without starting the app.
+rather than silently falling back to n0. The Peer sync wizard also has a
+**Relay endpoint** field: saving there writes `~/.config/iroh/relay-url` and
+restarts the endpoint immediately; an empty value restores the n0 relays. The
+same wizard shows this device's endpoint ID with a copy button. A private relay
+can accept **Request access** from the wizard: the request is stored on the
+server and the operator approves it out of band, so devices cannot add
+themselves. Self-hosted relays can also restrict access to a list of endpoint
+IDs; each device's `iroh.status` reports its `endpointId`, and `corcho
+--print-endpoint-id [--data-dir PATH]` prints it without starting the app.
 
 
 ## Acknowledgements

@@ -1763,6 +1763,7 @@ fn call_tool(core: &mut Core, name: &str, args: &Value, progress: ProgressFn) ->
                 .unwrap_or(false);
             Ok(core.iroh.share(read_only)?)
         }
+        "iroh.cache" => Ok(core.iroh.cache_ticket()?),
         "iroh.sync" => {
             report(progress, 0.3, "syncing peers");
             let status = core.iroh.sync_now()?;
@@ -3002,7 +3003,7 @@ fn tools() -> Vec<Value> {
     );
     add(
         "iroh.create",
-        "Create a new shared workspace and return its write ticket.",
+        "Create a new encrypted shared workspace and return its write setup code.",
         empty.clone(),
         vec![],
     );
@@ -3014,8 +3015,14 @@ fn tools() -> Vec<Value> {
     );
     add(
         "iroh.share",
-        "Return a share ticket for the current workspace.",
+        "Return a setup code for the current workspace.",
         json!({"readOnly":{"type":"boolean"}}),
+        vec![],
+    );
+    add(
+        "iroh.cache",
+        "Return a read-only cache ticket without the encryption key.",
+        empty.clone(),
         vec![],
     );
     add(

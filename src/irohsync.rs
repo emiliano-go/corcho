@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,6 +34,8 @@ const SCHEMA: u32 = 1;
 const STATE_FILE: &str = "sync-state.json";
 const ENDPOINT_KEY_FILE: &str = "endpoint.key";
 const DEBOUNCE: Duration = Duration::from_secs(2);
+const SETUP_PREFIX: &str = "corcho1:";
+const KEY_LEN: usize = 32;
 
 pub type SnapshotFn = Arc<dyn Fn() -> Option<Workspace> + Send + Sync>;
 pub type ApplyFn = Arc<dyn Fn(Vec<(String, Record)>) -> Option<bool> + Send + Sync>;
@@ -44,6 +50,14 @@ pub struct Record {
     pub deleted: bool,
     #[serde(default)]
     pub value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Sealed>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Sealed {
+    pub n: String,
+    pub c: String,
 }
 
 fn default_schema() -> u32 {
@@ -80,6 +94,10 @@ struct LocalState {
     last_sync: Option<String>,
     #[serde(default)]
     attachments: HashMap<String, String>,
+    #[serde(default)]
+    attachment_plain: HashMap<String, String>,
+    #[serde(default)]
+    key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,6 +124,7 @@ struct Status {
     read_ticket: bool,
     device: Option<String>,
     endpoint_id: Option<String>,
+    relay: Option<String>,
     clock: u64,
     peers: usize,
     last_sync: Option<String>,
@@ -139,9 +158,13 @@ enum Command {
     },
     Share {
         read_only: bool,
+        include_key: bool,
         reply: Sender<Result<String>>,
     },
     SyncNow {
+        reply: Sender<Result<String>>,
+    },
+    Relay {
         reply: Sender<Result<String>>,
     },
     Leave {
@@ -241,9 +264,24 @@ impl IrohSync {
 
     pub fn share(&self, read_only: bool) -> Result<String> {
         let (reply, rx) = std::sync::mpsc::channel();
-        self.send(Command::Share { read_only, reply })?;
+        self.send(Command::Share {
+            read_only,
+            include_key: true,
+            reply,
+        })?;
         rx.recv_timeout(Duration::from_secs(10))
             .map_err(|_| anyhow!("timed out creating the share ticket"))?
+    }
+
+    pub fn cache_ticket(&self) -> Result<String> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.send(Command::Share {
+            read_only: true,
+            include_key: false,
+            reply,
+        })?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| anyhow!("timed out creating the cache ticket"))?
     }
 
     pub fn sync_now(&self) -> Result<String> {
@@ -251,6 +289,13 @@ impl IrohSync {
         self.send(Command::SyncNow { reply })?;
         rx.recv_timeout(Duration::from_secs(60))
             .map_err(|_| anyhow!("timed out syncing the Iroh workspace"))?
+    }
+
+    pub fn reload_relay(&self) -> Result<String> {
+        let (reply, rx) = std::sync::mpsc::channel();
+        self.send(Command::Relay { reply })?;
+        rx.recv_timeout(Duration::from_secs(15))
+            .map_err(|_| anyhow!("timed out reloading the Iroh relay"))?
     }
 
     pub fn leave(&self) -> Result<String> {
@@ -287,6 +332,7 @@ impl IrohSync {
             .map(|d| d.is_some())
             .unwrap_or(false);
         let state = self.inner.state.lock().ok();
+        let encrypted = state.as_ref().map(|s| s.key.is_some()).unwrap_or(false);
         json!({
             "enabled": config.enabled,
             "includeAttachments": config.include_attachments,
@@ -297,6 +343,8 @@ impl IrohSync {
             "readTicket": status.read_ticket,
             "device": status.device,
             "endpointId": status.endpoint_id,
+            "relay": status.relay,
+            "encrypted": encrypted,
             "clock": status.clock,
             "peers": status.peers,
             "lastSync": status.last_sync,
@@ -353,7 +401,7 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
         }
     };
 
-    let network = match runtime.block_on(start_network(&inner)) {
+    let mut network = match runtime.block_on(start_network(&inner)) {
         Ok(net) => net,
         Err(err) => {
             set_error(&inner, format!("Iroh unavailable: {err}"));
@@ -371,6 +419,7 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
                     | Command::Join { reply, .. }
                     | Command::Share { reply, .. }
                     | Command::SyncNow { reply }
+                    | Command::Relay { reply }
                     | Command::Leave { reply } => {
                         let _ = reply.send(Err(anyhow!(
                             "Iroh is not available: {}",
@@ -458,10 +507,14 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
                     }
                 }
             }
-            Ok(Command::Share { read_only, reply }) => {
+            Ok(Command::Share {
+                read_only,
+                include_key,
+                reply,
+            }) => {
                 let result = match &doc {
                     Some(doc) => runtime
-                        .block_on(share_document(&inner, doc, read_only))
+                        .block_on(share_document(&inner, doc, read_only, include_key))
                         .map_err(|e| anyhow!("{e}")),
                     None => Err(anyhow!("no Iroh workspace configured")),
                 };
@@ -476,6 +529,44 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
                     Err(anyhow!("no Iroh workspace configured"))
                 };
                 let _ = reply.send(result);
+            }
+            Ok(Command::Relay { reply }) => {
+                if let Some(doc) = &doc {
+                    let _ = runtime.block_on(doc.close());
+                }
+                doc = None;
+                runtime.block_on(async {
+                    let _ = network.router.shutdown().await;
+                    let _ = network.blobs.shutdown().await;
+                    network.endpoint.close().await;
+                });
+                match runtime.block_on(start_network(&inner)) {
+                    Ok(fresh) => {
+                        network = fresh;
+                        if inner.config.lock().map(|c| c.enabled).unwrap_or(false) {
+                            match runtime.block_on(open_document(&inner, &network)) {
+                                Ok(Some(opened)) => {
+                                    doc = Some(opened.clone());
+                                    start_subscription(
+                                        inner.clone(),
+                                        opened,
+                                        runtime.handle().clone(),
+                                    );
+                                    inner.pull_requested.store(true, Ordering::Relaxed);
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    set_error(&inner, format!("cannot open Iroh workspace: {err}"))
+                                }
+                            }
+                        }
+                        let _ = reply.send(Ok("reloaded".into()));
+                    }
+                    Err(err) => {
+                        set_error(&inner, format!("Iroh unavailable: {err}"));
+                        let _ = reply.send(Err(err));
+                    }
+                }
             }
             Ok(Command::Leave { reply }) => {
                 if let Some(doc) = &doc {
@@ -545,6 +636,68 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
     });
 }
 
+fn relay_file_path() -> Result<PathBuf> {
+    let base =
+        directories::BaseDirs::new().ok_or_else(|| anyhow!("no config directory available"))?;
+    Ok(base.config_dir().join("iroh/relay-url"))
+}
+
+fn parse_relay_urls(raw: &str) -> Result<Vec<iroh::RelayUrl>> {
+    let urls: Vec<iroh::RelayUrl> = raw
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && !item.starts_with('#'))
+        .map(|item| {
+            item.parse()
+                .map_err(|err| anyhow!("invalid relay URL {item}: {err}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if urls.is_empty() {
+        return Err(anyhow!("Iroh relay config has no valid URL"));
+    }
+    Ok(urls)
+}
+
+/// The relay list saved by the user, without environment overrides.
+pub fn relay_url() -> String {
+    let Ok(path) = relay_file_path() else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    parse_relay_urls(&text)
+        .ok()
+        .and_then(|urls| urls.first().map(|url| url.to_string()))
+        .unwrap_or_default()
+}
+
+/// Save the relay list locally. An empty value removes the override and
+/// restores the public n0 relays on the next endpoint bind.
+pub fn set_relay_url(text: &str) -> Result<()> {
+    let path = relay_file_path()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(anyhow!("remove {}: {err}", path.display())),
+        }
+        return Ok(());
+    }
+    let urls = parse_relay_urls(trimmed)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = urls
+        .iter()
+        .map(|url| url.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_private(&path, body.as_bytes())
+}
+
 fn configured_relays() -> Result<Option<Vec<iroh::RelayUrl>>> {
     let mut raw = std::env::var("CORCHO_IROH_RELAY")
         .or_else(|_| std::env::var("IROH_RELAY_URL"))
@@ -555,10 +708,7 @@ fn configured_relays() -> Result<Option<Vec<iroh::RelayUrl>>> {
     let raw = match raw {
         Some(raw) => raw,
         None => {
-            let Some(base) = directories::BaseDirs::new() else {
-                return Ok(None);
-            };
-            let path = base.config_dir().join("iroh/relay-url");
+            let path = relay_file_path()?;
             match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -566,17 +716,7 @@ fn configured_relays() -> Result<Option<Vec<iroh::RelayUrl>>> {
             }
         }
     };
-    let urls: Vec<iroh::RelayUrl> = raw
-        .lines()
-        .flat_map(|line| line.split(','))
-        .map(str::trim)
-        .filter(|item| !item.is_empty() && !item.starts_with('#'))
-        .filter_map(|item| item.parse().ok())
-        .collect();
-    if urls.is_empty() {
-        return Err(anyhow!("Iroh relay config has no valid URL"));
-    }
-    Ok(Some(urls))
+    Ok(Some(parse_relay_urls(&raw)?))
 }
 
 async fn start_network(inner: &Arc<Inner>) -> Result<Network> {
@@ -586,8 +726,13 @@ async fn start_network(inner: &Arc<Inner>) -> Result<Network> {
     std::fs::create_dir_all(iroh_dir.join("docs"))?;
 
     let key = load_endpoint_key(&iroh_dir)?;
+    let relays = configured_relays()?;
+    let relay = relays
+        .as_ref()
+        .and_then(|relays| relays.first())
+        .map(|url| url.to_string());
     let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
-    if let Some(relays) = configured_relays()? {
+    if let Some(relays) = relays {
         builder = builder.relay_mode(iroh::endpoint::RelayMode::custom(relays));
     }
     let endpoint = builder
@@ -595,7 +740,11 @@ async fn start_network(inner: &Arc<Inner>) -> Result<Network> {
         .bind()
         .await
         .map_err(|e| anyhow!("bind endpoint: {e}"))?;
-    inner.status.lock().unwrap().endpoint_id = Some(endpoint.id().to_string());
+    {
+        let mut status = inner.status.lock().unwrap();
+        status.endpoint_id = Some(endpoint.id().to_string());
+        status.relay = relay;
+    }
 
     let blobs = iroh_blobs::store::fs::FsStore::load(iroh_dir.join("blobs"))
         .await
@@ -706,13 +855,20 @@ async fn create_workspace(
         .await
         .ok();
     let write = encode_ticket(&write);
+    let key: [u8; KEY_LEN] = rand::random();
+    let write = wrap_ticket(&write, Some(&key));
     {
         let mut state = inner.state.lock().unwrap();
+        state.key = Some(encode_key(&key));
         state.write_ticket = Some(write.clone());
-        state.read_ticket = read.as_ref().map(encode_ticket);
+        state.read_ticket = read
+            .as_ref()
+            .map(|ticket| wrap_ticket(&encode_ticket(ticket), Some(&key)));
         state.clock = state.clock.max(1);
         state.applied.clear();
         state.last_published.clear();
+        state.attachments.clear();
+        state.attachment_plain.clear();
         state.last_sync = Some("created".into());
         save_state(inner, &state);
     }
@@ -732,8 +888,9 @@ async fn join_workspace(
     network: &Network,
     ticket: &str,
 ) -> Result<iroh_docs::api::Doc> {
-    let parsed = parse_ticket(ticket)?;
+    let (parsed, incoming_key) = parse_setup_code(ticket)?;
     let writable = matches!(parsed.capability, iroh_docs::Capability::Write(_));
+    let raw_ticket = encode_ticket(&parsed);
     let (doc, _events) = network
         .docs
         .import_and_subscribe(parsed)
@@ -741,10 +898,15 @@ async fn join_workspace(
         .map_err(|e| anyhow!("join document: {e}"))?;
     {
         let mut state = inner.state.lock().unwrap();
+        if let Some(key) = incoming_key {
+            state.key = Some(encode_key(&key));
+        }
+        let effective = state.key.as_deref().and_then(|text| decode_key(text).ok());
+        let stored = wrap_ticket(&raw_ticket, effective.as_ref());
         if writable {
-            state.write_ticket = Some(ticket.to_string());
+            state.write_ticket = Some(stored);
         } else {
-            state.read_ticket = Some(ticket.to_string());
+            state.read_ticket = Some(stored);
         }
         state.last_sync = Some("joined".into());
         save_state(inner, &state);
@@ -764,6 +926,7 @@ async fn share_document(
     inner: &Arc<Inner>,
     doc: &iroh_docs::api::Doc,
     read_only: bool,
+    include_key: bool,
 ) -> Result<String> {
     let mode = if read_only {
         iroh_docs::api::protocol::ShareMode::Read
@@ -778,8 +941,17 @@ async fn share_document(
         .await
         .map_err(|e| anyhow!("share: {e}"))?;
     let text = encode_ticket(&ticket);
-    {
-        let mut state = inner.state.lock().unwrap();
+    let mut state = inner.state.lock().unwrap();
+    let key = state
+        .key
+        .as_deref()
+        .and_then(|value| decode_key(value).ok());
+    let text = if include_key {
+        wrap_ticket(&text, key.as_ref())
+    } else {
+        text
+    };
+    if include_key {
         if read_only {
             state.read_ticket = Some(text.clone());
         } else {
@@ -848,23 +1020,54 @@ async fn publish(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::api::Do
     let mut plan: Vec<(String, Vec<u8>)> = Vec::new();
     let mut tombstones: Vec<(String, Vec<u8>)> = Vec::new();
     {
+        let state_key = inner.state.lock().unwrap().key.clone();
+        let crypto_key = match state_key.as_deref() {
+            Some(text) => match decode_key(text) {
+                Ok(key) => Some(key),
+                Err(err) => {
+                    set_error(inner, format!("invalid workspace key: {err}"));
+                    return false;
+                }
+            },
+            None => None,
+        };
         let mut state = inner.state.lock().unwrap();
         let device = state.device.clone();
-        for (key, value) in &records {
+        for (record_key, value) in &records {
             let hash = value_hash(value);
-            if state.last_published.get(key) == Some(&hash) {
+            if state.last_published.get(record_key) == Some(&hash) {
                 continue;
             }
             state.clock = state.clock.saturating_add(1);
-            let record = Record {
-                v: SCHEMA,
-                device: device.clone(),
-                clock: state.clock,
-                deleted: false,
-                value: Some(value.clone()),
+            let record = match &crypto_key {
+                Some(key) if !record_key.starts_with("attachment/") => {
+                    let plain = match serde_json::to_vec(value) {
+                        Ok(plain) => plain,
+                        Err(_) => continue,
+                    };
+                    match seal_random(key, record_key.as_bytes(), &plain) {
+                        Ok(sealed) => Record {
+                            v: SCHEMA,
+                            device: device.clone(),
+                            clock: state.clock,
+                            deleted: false,
+                            value: None,
+                            sealed: Some(sealed),
+                        },
+                        Err(_) => continue,
+                    }
+                }
+                _ => Record {
+                    v: SCHEMA,
+                    device: device.clone(),
+                    clock: state.clock,
+                    deleted: false,
+                    value: Some(value.clone()),
+                    sealed: None,
+                },
             };
             match serde_json::to_vec(&record) {
-                Ok(bytes) => plan.push((key.clone(), bytes)),
+                Ok(bytes) => plan.push((record_key.clone(), bytes)),
                 Err(_) => continue,
             }
         }
@@ -882,6 +1085,7 @@ async fn publish(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::api::Do
                 clock: state.clock,
                 deleted: true,
                 value: None,
+                sealed: None,
             };
             if let Ok(bytes) = serde_json::to_vec(&record) {
                 tombstones.push((key, bytes));
@@ -951,7 +1155,11 @@ async fn pull_and_apply(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::
         let Ok(record) = serde_json::from_slice::<Record>(&bytes) else {
             continue;
         };
-        let hash = value_hash(&record_json(&record));
+        let hash = if record.sealed.is_some() {
+            String::new()
+        } else {
+            value_hash(&record_json(&record))
+        };
         match latest.get(&key) {
             Some((existing, _)) if !record.newer_than(existing.clock, &existing.device) => {}
             _ => {
@@ -960,10 +1168,40 @@ async fn pull_and_apply(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::
         }
     }
 
+    let state_key = inner.state.lock().unwrap().key.clone();
+    let crypto_key = match state_key.as_deref() {
+        Some(text) => match decode_key(text) {
+            Ok(key) => Some(key),
+            Err(err) => {
+                set_error(inner, format!("invalid workspace key: {err}"));
+                None
+            }
+        },
+        None => None,
+    };
+    let mut decrypted: HashMap<String, (Record, String)> = HashMap::new();
+    for (key, (mut record, _hash)) in latest {
+        if record.sealed.is_some() {
+            let Some(crypto_key) = crypto_key.as_ref() else {
+                set_error(
+                    inner,
+                    "workspace is encrypted; join it with a setup code".into(),
+                );
+                continue;
+            };
+            if let Err(err) = decrypt_record(crypto_key, &key, &mut record) {
+                set_error(inner, format!("cannot decrypt {key}: {err}"));
+                continue;
+            }
+        }
+        let hash = value_hash(&record_json(&record));
+        decrypted.insert(key, (record, hash));
+    }
+
     let mut to_apply: Vec<(String, Record)> = Vec::new();
     {
         let state = inner.state.lock().unwrap();
-        for (key, (record, _hash)) in &latest {
+        for (key, (record, _hash)) in &decrypted {
             let applied = state.applied.get(key);
             let stale = applied
                 .map(|a| !record.newer_than(a.clock, &a.device))
@@ -1041,28 +1279,55 @@ async fn publish_attachments(
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
+    let state_key = inner.state.lock().unwrap().key.clone();
+    let crypto_key = state_key.as_deref().and_then(|text| decode_key(text).ok());
     for entry in entries.flatten() {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let Ok(tag) = network.blobs.add_path(entry.path()).await else {
+        let Ok(bytes) = std::fs::read(entry.path()) else {
             continue;
         };
-        let hash = tag.hash.to_string();
+        let plain_hash = sha256_hex(&bytes);
         {
-            let mut state = inner.state.lock().unwrap();
-            if state.attachments.get(&name) == Some(&hash) {
+            let state = inner.state.lock().unwrap();
+            if state.attachment_plain.get(&name) == Some(&plain_hash) {
                 continue;
             }
+        }
+        let (hash, nonce) = match &crypto_key {
+            Some(key) => {
+                let nonce = attachment_nonce(key, &name, &bytes);
+                let aad = format!("attachment/{name}");
+                let Ok(ciphertext) = seal_bytes(key, nonce, aad.as_bytes(), &bytes) else {
+                    continue;
+                };
+                let Ok(tag) = network.blobs.add_bytes(ciphertext).await else {
+                    continue;
+                };
+                (tag.hash.to_string(), Some(URL_SAFE_NO_PAD.encode(nonce)))
+            }
+            None => {
+                let Ok(tag) = network.blobs.add_bytes(bytes).await else {
+                    continue;
+                };
+                (tag.hash.to_string(), None)
+            }
+        };
+        {
+            let mut state = inner.state.lock().unwrap();
             state.attachments.insert(name.clone(), hash.clone());
+            state.attachment_plain.insert(name.clone(), plain_hash);
             save_state(inner, &state);
         }
-        records.insert(
-            format!("attachment/{name}"),
-            json!({"hash": hash, "name": name, "size": size}),
-        );
+        let mut value = json!({"hash": hash, "name": name, "size": size});
+        if let Some(nonce) = nonce {
+            value["enc"] = json!(true);
+            value["nonce"] = json!(nonce);
+        }
+        records.insert(format!("attachment/{name}"), value);
     }
 }
 
@@ -1082,7 +1347,30 @@ async fn export_attachment(inner: &Arc<Inner>, network: &Network, key: &str, rec
     }
     let dir = storage::attachments_dir(&inner.data_dir);
     let _ = std::fs::create_dir_all(&dir);
-    let _ = network.blobs.export(hash, dir.join(name)).await;
+    let encrypted = value.get("enc").and_then(|v| v.as_bool()).unwrap_or(false);
+    if encrypted {
+        let Some(nonce) = value
+            .get("nonce")
+            .and_then(|v| v.as_str())
+            .and_then(|v| URL_SAFE_NO_PAD.decode(v).ok())
+        else {
+            return;
+        };
+        let state_key = inner.state.lock().unwrap().key.clone();
+        let Some(crypto_key) = state_key.as_deref().and_then(|text| decode_key(text).ok()) else {
+            return;
+        };
+        let Ok(ciphertext) = network.blobs.get_bytes(hash).await else {
+            return;
+        };
+        let aad = format!("attachment/{name}");
+        let Ok(plain) = open_bytes(&crypto_key, &nonce, aad.as_bytes(), &ciphertext) else {
+            return;
+        };
+        let _ = std::fs::write(dir.join(name), plain);
+    } else {
+        let _ = network.blobs.export(hash, dir.join(name)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1434,9 +1722,135 @@ fn now() -> String {
 }
 
 fn parse_ticket(text: &str) -> Result<iroh_docs::DocTicket> {
+    Ok(parse_setup_code(text)?.0)
+}
+
+fn decode_key(text: &str) -> Result<[u8; KEY_LEN]> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(text.trim())
+        .map_err(|e| anyhow!("invalid workspace key: {e}"))?;
+    if bytes.len() != KEY_LEN {
+        return Err(anyhow!("invalid workspace key length"));
+    }
+    let mut key = [0u8; KEY_LEN];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn encode_key(key: &[u8; KEY_LEN]) -> String {
+    URL_SAFE_NO_PAD.encode(key)
+}
+
+fn wrap_ticket(ticket: &str, key: Option<&[u8; KEY_LEN]>) -> String {
+    match key {
+        Some(key) => format!("{SETUP_PREFIX}{}:{ticket}", encode_key(key)),
+        None => ticket.to_string(),
+    }
+}
+
+fn parse_setup_code(text: &str) -> Result<(iroh_docs::DocTicket, Option<[u8; KEY_LEN]>)> {
     use iroh_tickets::Ticket;
-    iroh_docs::DocTicket::decode_string(text.trim())
-        .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix(SETUP_PREFIX) {
+        let (key_text, ticket_text) = rest
+            .split_once(':')
+            .ok_or_else(|| anyhow!("invalid Corcho setup code"))?;
+        let key = decode_key(key_text)?;
+        let ticket = iroh_docs::DocTicket::decode_string(ticket_text)
+            .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))?;
+        Ok((ticket, Some(key)))
+    } else {
+        let ticket = iroh_docs::DocTicket::decode_string(text)
+            .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))?;
+        Ok((ticket, None))
+    }
+}
+
+fn seal_bytes(
+    key: &[u8; KEY_LEN],
+    nonce: [u8; 24],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key));
+    cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| anyhow!("encrypt data"))
+}
+
+fn open_bytes(key: &[u8; KEY_LEN], nonce: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    if nonce.len() != 24 {
+        return Err(anyhow!("invalid nonce length"));
+    }
+    let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(key));
+    cipher
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .map_err(|_| anyhow!("cannot decrypt data"))
+}
+
+fn seal(key: &[u8; KEY_LEN], nonce: [u8; 24], aad: &[u8], plaintext: &[u8]) -> Result<Sealed> {
+    let ciphertext = seal_bytes(key, nonce, aad, plaintext)?;
+    Ok(Sealed {
+        n: URL_SAFE_NO_PAD.encode(nonce),
+        c: URL_SAFE_NO_PAD.encode(ciphertext),
+    })
+}
+
+fn seal_random(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Sealed> {
+    let nonce: [u8; 24] = rand::random();
+    seal(key, nonce, aad, plaintext)
+}
+
+fn open_sealed(key: &[u8; KEY_LEN], aad: &[u8], sealed: &Sealed) -> Result<Vec<u8>> {
+    let nonce = URL_SAFE_NO_PAD
+        .decode(&sealed.n)
+        .map_err(|e| anyhow!("invalid record nonce: {e}"))?;
+    if nonce.len() != 24 {
+        return Err(anyhow!("invalid record nonce length"));
+    }
+    let ciphertext = URL_SAFE_NO_PAD
+        .decode(&sealed.c)
+        .map_err(|e| anyhow!("invalid record ciphertext: {e}"))?;
+    open_bytes(key, &nonce, aad, &ciphertext)
+}
+
+fn decrypt_record(key: &[u8; KEY_LEN], record_key: &str, record: &mut Record) -> Result<()> {
+    let Some(sealed) = record.sealed.take() else {
+        return Ok(());
+    };
+    let plain = open_sealed(key, record_key.as_bytes(), &sealed)?;
+    record.value = Some(
+        serde_json::from_slice(&plain).map_err(|err| anyhow!("invalid decrypted record: {err}"))?,
+    );
+    Ok(())
+}
+
+fn attachment_nonce(key: &[u8; KEY_LEN], name: &str, plaintext: &[u8]) -> [u8; 24] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"corcho-attachment-nonce");
+    hasher.update(key);
+    hasher.update(name.as_bytes());
+    hasher.update(plaintext);
+    let digest = hasher.finalize();
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&digest[..24]);
+    nonce
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn encode_ticket(ticket: &iroh_docs::DocTicket) -> String {
@@ -1448,9 +1862,58 @@ fn encode_ticket(ticket: &iroh_docs::DocTicket) -> String {
 // Headless archival daemon
 // ---------------------------------------------------------------------------
 
+async fn prefetch(network: &Network, doc: &iroh_docs::api::Doc) {
+    use futures_util::StreamExt;
+    let Ok(entries) = doc
+        .get_many(iroh_docs::store::Query::single_latest_per_key().build())
+        .await
+    else {
+        return;
+    };
+    let mut entries = Box::pin(entries);
+    while let Some(entry) = entries.next().await {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let key = String::from_utf8_lossy(entry.key()).to_string();
+        let Ok(bytes) = network.blobs.get_bytes(entry.content_hash()).await else {
+            continue;
+        };
+        if !key.starts_with("attachment/") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Record>(&bytes) else {
+            continue;
+        };
+        let Some(value) = record.value else {
+            continue;
+        };
+        let Some(hash) = value.get("hash").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Ok(hash) = hash.parse::<iroh_blobs::Hash>() {
+            let _ = network.blobs.get_bytes(hash).await;
+        }
+    }
+}
+
+fn wipe_cache(data_dir: &Path) {
+    for name in ["docs", "blobs"] {
+        let path = data_dir.join("iroh").join(name);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => eprintln!("corcho sync daemon: expired {}", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!(
+                "corcho sync daemon: cannot remove {}: {err}",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Join a workspace read-only and keep a persistent copy so other devices can
 /// sync even when every writer is offline. Never publishes.
-pub fn run_daemon(data_dir: PathBuf, ticket: String) -> Result<()> {
+pub fn run_daemon(data_dir: PathBuf, ticket: String, ttl_hours: u64) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
@@ -1474,6 +1937,8 @@ pub fn run_daemon(data_dir: PathBuf, ticket: String) -> Result<()> {
         });
         let network = start_network(&inner).await?;
         let parsed = parse_ticket(&ticket)?;
+        let ttl = (ttl_hours > 0).then(|| Duration::from_secs(ttl_hours * 3600));
+        let deadline = ttl.map(|ttl| Instant::now() + ttl);
         let (doc, mut events) = network
             .docs
             .import_and_subscribe(parsed)
@@ -1487,10 +1952,22 @@ pub fn run_daemon(data_dir: PathBuf, ticket: String) -> Result<()> {
         use futures_util::StreamExt;
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut expired = false;
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
         loop {
+            if deadline
+                .map(|deadline| Instant::now() >= deadline)
+                .unwrap_or(false)
+            {
+                expired = true;
+                break;
+            }
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => break,
                 _ = sigterm.recv() => break,
+                _ = ticker.tick() => {
+                    prefetch(&network, &doc).await;
+                }
                 event = events.next() => {
                     match event {
                         Some(Ok(iroh_docs::engine::LiveEvent::NeighborUp(id))) => {
@@ -1504,8 +1981,14 @@ pub fn run_daemon(data_dir: PathBuf, ticket: String) -> Result<()> {
         }
         // Flush the stores before exiting; FsStore otherwise loses the last
         // seconds of writes.
+        let _ = doc.close().await;
         let _ = network.router.shutdown().await;
         let _ = network.blobs.shutdown().await;
+        network.endpoint.close().await;
+        if expired {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            wipe_cache(&inner.data_dir);
+        }
         Ok::<(), anyhow::Error>(())
     })
 }
@@ -1542,6 +2025,7 @@ mod tests {
                         clock: 1,
                         deleted: false,
                         value: Some(value),
+                        sealed: None,
                     },
                 )
             })
@@ -1567,6 +2051,7 @@ mod tests {
                 clock: 2,
                 deleted: true,
                 value: None,
+                sealed: None,
             },
         )];
         assert!(apply_records(&mut ws, &records));
@@ -1588,6 +2073,79 @@ mod tests {
     }
 
     #[test]
+    fn relay_url_list_parses_and_rejects_garbage() {
+        let urls =
+            parse_relay_urls("https://relay.example.com\n# comment\nhttps://backup.example.com")
+                .unwrap();
+        assert_eq!(urls.len(), 2);
+        assert!(parse_relay_urls("# only comments").is_err());
+        assert!(parse_relay_urls("not a url").is_err());
+    }
+
+    #[test]
+    fn sealed_roundtrip_binds_aad_and_key() {
+        let key: [u8; KEY_LEN] = rand::random();
+        let sealed = seal_random(&key, b"card/a", b"hello").unwrap();
+        assert_eq!(open_sealed(&key, b"card/a", &sealed).unwrap(), b"hello");
+        assert!(open_sealed(&key, b"card/b", &sealed).is_err());
+        let other: [u8; KEY_LEN] = rand::random();
+        assert!(open_sealed(&other, b"card/a", &sealed).is_err());
+    }
+
+    #[test]
+    fn cache_wipe_keeps_the_endpoint_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let iroh = dir.path().join("iroh");
+        std::fs::create_dir_all(iroh.join("docs")).unwrap();
+        std::fs::create_dir_all(iroh.join("blobs")).unwrap();
+        std::fs::write(iroh.join("docs/entry"), b"x").unwrap();
+        std::fs::write(iroh.join("blobs/blob"), b"y").unwrap();
+        std::fs::write(iroh.join(ENDPOINT_KEY_FILE), b"key").unwrap();
+        wipe_cache(dir.path());
+        assert!(!iroh.join("docs").exists());
+        assert!(!iroh.join("blobs").exists());
+        assert!(iroh.join(ENDPOINT_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn encrypted_record_roundtrips() {
+        let key: [u8; KEY_LEN] = rand::random();
+        let plain = json!({"grid": "g", "card": {"id": "c", "title": "secret"}});
+        let sealed = seal_random(&key, b"card/c", &serde_json::to_vec(&plain).unwrap()).unwrap();
+        let mut record = Record {
+            v: SCHEMA,
+            device: "dev".into(),
+            clock: 1,
+            deleted: false,
+            value: None,
+            sealed: Some(sealed),
+        };
+        decrypt_record(&key, "card/c", &mut record).unwrap();
+        assert_eq!(record.value, Some(plain));
+        assert!(record.sealed.is_none());
+    }
+
+    #[test]
+    fn key_encoding_roundtrips() {
+        let key: [u8; KEY_LEN] = rand::random();
+        assert_eq!(decode_key(&encode_key(&key)).unwrap(), key);
+        assert!(decode_key("short").is_err());
+    }
+
+    #[test]
+    fn attachment_nonce_is_deterministic_per_name() {
+        let key: [u8; KEY_LEN] = rand::random();
+        assert_eq!(
+            attachment_nonce(&key, "a.png", b"data"),
+            attachment_nonce(&key, "a.png", b"data")
+        );
+        assert_ne!(
+            attachment_nonce(&key, "a.png", b"data"),
+            attachment_nonce(&key, "b.png", b"data")
+        );
+    }
+
+    #[test]
     fn newer_record_wins_by_clock_then_device() {
         let mut ws = Workspace::default();
         let id = card(&mut ws, "old");
@@ -1598,6 +2156,7 @@ mod tests {
             clock: 5,
             deleted: false,
             value: Some(value.clone()),
+            sealed: None,
         };
         let mut newer_card = serde_json::from_value::<Card>(value["card"].clone()).unwrap();
         newer_card.title = "new".into();
@@ -1611,6 +2170,7 @@ mod tests {
             clock: 4,
             deleted: false,
             value: Some(value.clone()),
+            sealed: None,
         };
         assert!(!older.newer_than(newer.clock, &newer.device));
         assert!(newer.newer_than(older.clock, &older.device));

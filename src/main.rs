@@ -120,6 +120,7 @@ fn main() {
     if let Some(index) = args.iter().position(|a| a == "--sync-daemon") {
         let mut ticket = String::new();
         let mut data_dir = storage::default_data_dir();
+        let mut ttl_hours = 0u64;
         let mut i = index + 1;
         while i < args.len() {
             match args[i].as_str() {
@@ -135,6 +136,12 @@ fn main() {
                     }
                     i += 2;
                 }
+                "--ttl-hours" => {
+                    if let Some(value) = args.get(i + 1) {
+                        ttl_hours = value.parse().unwrap_or(0);
+                    }
+                    i += 2;
+                }
                 other if !other.starts_with("--") => {
                     ticket = other.to_string();
                     i += 1;
@@ -146,7 +153,7 @@ fn main() {
             eprintln!("corcho sync daemon: --ticket <read-ticket> is required");
             std::process::exit(2);
         }
-        if let Err(err) = irohsync::run_daemon(data_dir, ticket) {
+        if let Err(err) = irohsync::run_daemon(data_dir, ticket, ttl_hours) {
             eprintln!("corcho sync daemon: {err}");
             std::process::exit(1);
         }
