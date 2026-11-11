@@ -203,7 +203,7 @@ API keys are write-only: `settings.get` redacts them; logs never include them.
 | `sync.now` | - |
 | `sync.configure` | `enabled`, `provider` (`folder`\|`gdrive`), `folder?` |
 | `gdrive.connect` / `gdrive.disconnect` | PKCE flow (browser) |
-| `iroh.status` | enabled, namespace, peers, last sync, last error |
+| `iroh.status` | enabled, namespace, endpoint id, peers, last sync, last error |
 | `iroh.create` | create a shared workspace and return its write ticket |
 | `iroh.join` | `ticket` |
 | `iroh.share` | `readOnly` (`false` returns the write ticket) |

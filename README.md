@@ -168,6 +168,24 @@ a new device can sync while all your writer devices are offline. A systemd
 unit example lives in `packaging/corcho-syncd.service`. Relays only provide
 connectivity; they are not a durable copy.
 
+### Relay
+
+Every device can share one redundant relay list instead of the public n0
+relays. `CORCHO_IROH_RELAY` (or the generic `IROH_RELAY_URL`) takes a
+comma-separated list; when both are unset, `~/.config/iroh/relay-url` is read
+(one URL per line, `#` comments allowed):
+
+```sh
+CORCHO_IROH_RELAY=https://relay.example.com
+```
+
+An unreadable file or a non-empty setting with no valid URL fails startup
+rather than silently falling back to n0. Self-hosted relays can restrict access
+to a list of endpoint IDs; each device's `iroh.status` reports its
+`endpointId`, and `corcho --print-endpoint-id [--data-dir PATH]` prints it
+without starting the app.
+
+
 ## Acknowledgements
 
 Corcho is an independent native implementation inspired by the ideas in

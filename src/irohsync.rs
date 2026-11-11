@@ -105,6 +105,7 @@ struct Status {
     write_ticket: bool,
     read_ticket: bool,
     device: Option<String>,
+    endpoint_id: Option<String>,
     clock: u64,
     peers: usize,
     last_sync: Option<String>,
@@ -295,6 +296,7 @@ impl IrohSync {
             "writeTicket": status.write_ticket,
             "readTicket": status.read_ticket,
             "device": status.device,
+            "endpointId": status.endpoint_id,
             "clock": status.clock,
             "peers": status.peers,
             "lastSync": status.last_sync,
@@ -543,6 +545,40 @@ fn worker(inner: Arc<Inner>, rx: Receiver<Command>) {
     });
 }
 
+fn configured_relays() -> Result<Option<Vec<iroh::RelayUrl>>> {
+    let mut raw = std::env::var("CORCHO_IROH_RELAY")
+        .or_else(|_| std::env::var("IROH_RELAY_URL"))
+        .ok();
+    if raw.as_deref().map(str::trim).is_some_and(str::is_empty) {
+        raw = None;
+    }
+    let raw = match raw {
+        Some(raw) => raw,
+        None => {
+            let Some(base) = directories::BaseDirs::new() else {
+                return Ok(None);
+            };
+            let path = base.config_dir().join("iroh/relay-url");
+            match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(err) => return Err(anyhow!("read {}: {err}", path.display())),
+            }
+        }
+    };
+    let urls: Vec<iroh::RelayUrl> = raw
+        .lines()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && !item.starts_with('#'))
+        .filter_map(|item| item.parse().ok())
+        .collect();
+    if urls.is_empty() {
+        return Err(anyhow!("Iroh relay config has no valid URL"));
+    }
+    Ok(Some(urls))
+}
+
 async fn start_network(inner: &Arc<Inner>) -> Result<Network> {
     let iroh_dir = inner.data_dir.join("iroh");
     std::fs::create_dir_all(&iroh_dir)?;
@@ -550,11 +586,16 @@ async fn start_network(inner: &Arc<Inner>) -> Result<Network> {
     std::fs::create_dir_all(iroh_dir.join("docs"))?;
 
     let key = load_endpoint_key(&iroh_dir)?;
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+    let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
+    if let Some(relays) = configured_relays()? {
+        builder = builder.relay_mode(iroh::endpoint::RelayMode::custom(relays));
+    }
+    let endpoint = builder
         .secret_key(key)
         .bind()
         .await
         .map_err(|e| anyhow!("bind endpoint: {e}"))?;
+    inner.status.lock().unwrap().endpoint_id = Some(endpoint.id().to_string());
 
     let blobs = iroh_blobs::store::fs::FsStore::load(iroh_dir.join("blobs"))
         .await
@@ -600,6 +641,12 @@ fn load_endpoint_key(dir: &Path) -> Result<iroh::SecretKey> {
     let key = iroh::SecretKey::generate();
     write_private(&path, &key.to_bytes())?;
     Ok(key)
+}
+
+pub fn endpoint_id(data_dir: &Path) -> Result<String> {
+    let dir = data_dir.join("iroh");
+    std::fs::create_dir_all(&dir)?;
+    Ok(load_endpoint_key(&dir)?.public().to_string())
 }
 
 async fn open_document(

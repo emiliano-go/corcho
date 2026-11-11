@@ -51,6 +51,22 @@ fn main() {
         std::env::set_var("MALLOC_ARENA_MAX", "2");
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--print-endpoint-id") {
+        let data_dir = args
+            .iter()
+            .position(|a| a == "--data-dir")
+            .and_then(|i| args.get(i + 1))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(storage::default_data_dir);
+        match irohsync::endpoint_id(&data_dir) {
+            Ok(id) => println!("{id}"),
+            Err(err) => {
+                eprintln!("corcho: {err}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let mcp_mode = args.iter().any(|a| a == "--mcp" || a == "--mcp-http")
         || std::env::var("CORCHO_MCP").as_deref() == Ok("1");
     if !mcp_mode {
