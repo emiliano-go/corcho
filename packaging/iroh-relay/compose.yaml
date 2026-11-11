@@ -24,7 +24,7 @@ services:
       - ./config.toml:/config.toml:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.iroh-relay.rule=Host(`${RELAY_DOMAIN}`) && !PathPrefix(`/access`)"
+      - "traefik.http.routers.iroh-relay.rule=Host(`${RELAY_DOMAIN}`) && !PathPrefix(`/access`) && !PathPrefix(`/pair`)"
       - "traefik.http.routers.iroh-relay.entrypoints=websecure"
       - "traefik.http.routers.iroh-relay.tls.certresolver=le"
       - "traefik.http.services.iroh-relay.loadbalancer.server.port=8080"
@@ -58,7 +58,7 @@ services:
       - ./state:/state
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.iroh-relay-access.rule=Host(`${RELAY_DOMAIN}`) && PathPrefix(`/access`)"
+      - "traefik.http.routers.iroh-relay-access.rule=Host(`${RELAY_DOMAIN}`) && (PathPrefix(`/access`) || PathPrefix(`/pair`))"
       - "traefik.http.routers.iroh-relay-access.priority=100"
       - "traefik.http.routers.iroh-relay-access.entrypoints=websecure"
       - "traefik.http.routers.iroh-relay-access.tls.certresolver=le"

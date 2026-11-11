@@ -11,6 +11,7 @@ mod irohsync;
 mod logging;
 mod mcp;
 mod model;
+mod pairing;
 mod search;
 mod single_instance;
 mod storage;

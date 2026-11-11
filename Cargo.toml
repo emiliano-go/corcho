@@ -15,7 +15,7 @@ cxx-qt-lib = { version = "0.10", features = ["qt_full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "fs", "io-util", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "blocking"] }
 futures-util = "0.3"
 notify = "8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
+pbkdf2 = { version = "0.12", features = ["hmac"] }
 rand = "0.10"
 url = "2"
 open = "5"

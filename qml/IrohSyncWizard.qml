@@ -15,6 +15,9 @@ Item {
     property string relaySaved: ""
     property string accessError: ""
     property string accessSaved: ""
+    property string pairCode: ""
+    property string shownPairCode: ""
+    property string pairError: ""
 
     signal closed()
 
@@ -25,6 +28,8 @@ Item {
     readonly property var status: {
         try { return JSON.parse(app.irohJson || "{}"); } catch (e) { return {}; }
     }
+    readonly property bool hasWorkspace: root.status.namespace !== null
+        && root.status.namespace !== undefined
 
     Timer {
         interval: 2000
@@ -43,6 +48,9 @@ Item {
         relaySaved = "";
         accessError = "";
         accessSaved = "";
+        pairCode = "";
+        shownPairCode = "";
+        pairError = "";
         opened = true;
     }
 
@@ -90,6 +98,32 @@ Item {
             return;
         }
         shownTicket = value;
+    }
+
+    function createPair() {
+        pairError = "";
+        shownPairCode = "";
+        var code = root.app.irohPairCreate();
+        if (code === "") {
+            pairError = "Could not create a word code.";
+            return;
+        }
+        shownPairCode = code;
+    }
+
+    function joinPair() {
+        pairError = "";
+        if (root.pairCode.trim() === "") {
+            pairError = "Enter the word code.";
+            return;
+        }
+        var error = root.app.irohPairJoin(root.pairCode.trim());
+        if (error !== "") {
+            pairError = error;
+            return;
+        }
+        root.setSetting("iroh_sync_enabled", true);
+        root.close();
     }
 
     function copyCacheTicket() {
@@ -426,21 +460,61 @@ Item {
                         onClicked: root.join()
                     }
                 }
+                Rectangle {
+                    width: parent.width
+                    height: root.th.borderWidth
+                    color: root.th.border
+                }
+                Text {
+                    width: parent.width
+                    text: "Or pair with a word code"
+                    color: root.th.text2
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                Row {
+                    width: parent.width
+                    spacing: root.th.space2
+                    AppTextField {
+                        width: parent.width - pairButton.width - root.th.space2
+                        th: root.th
+                        text: root.pairCode
+                        placeholder: "six-little-words"
+                        onEdited: function (value) { root.pairCode = value; }
+                        onAccepted: root.joinPair()
+                    }
+                    AppButton {
+                        id: pairButton
+                        th: root.th
+                        text: "Pair"
+                        onClicked: root.joinPair()
+                    }
+                }
+                Text {
+                    width: parent.width
+                    text: root.pairError
+                    visible: root.pairError !== ""
+                    color: root.th.danger
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
             }
 
             Rectangle {
                 width: parent.width
                 height: root.th.borderWidth
-                visible: root.shownTicket !== ""
+                visible: root.hasWorkspace || root.shownTicket !== ""
                 color: root.th.border
             }
 
             Column {
                 width: parent.width
                 spacing: root.th.space2
-                visible: root.shownTicket !== ""
+                visible: root.hasWorkspace || root.shownTicket !== ""
                 Text {
                     width: parent.width
+                    visible: root.shownTicket !== ""
                     text: "Setup code (includes the encryption key; treat it like a password)"
                     color: root.th.text2
                     wrapMode: Text.WordWrap
@@ -450,6 +524,7 @@ Item {
                 TextEdit {
                     width: parent.width
                     height: 72
+                    visible: root.shownTicket !== ""
                     text: root.shownTicket
                     readOnly: true
                     selectByMouse: true
@@ -464,6 +539,7 @@ Item {
                     spacing: root.th.space2
                     AppButton {
                         th: root.th
+                        visible: root.shownTicket !== ""
                         text: "Copy"
                         onClicked: root.app.copyText(root.shownTicket)
                     }
@@ -491,6 +567,57 @@ Item {
                     wrapMode: Text.WordWrap
                     font.family: root.th.fontFamily
                     font.pixelSize: root.th.fontSizeCaption
+                }
+                Rectangle {
+                    width: parent.width
+                    height: root.th.borderWidth
+                    color: root.th.border
+                }
+                Row {
+                    spacing: root.th.space2
+                    AppButton {
+                        th: root.th
+                        text: "Pair with words"
+                        variant: "solid"
+                        onClicked: root.createPair()
+                    }
+                    AppButton {
+                        th: root.th
+                        text: "Copy"
+                        visible: root.shownPairCode !== ""
+                        onClicked: root.app.copyText(root.shownPairCode)
+                    }
+                }
+                Text {
+                    width: parent.width
+                    visible: root.shownPairCode !== ""
+                    text: "Word code (valid for 10 minutes; type it on the other device)"
+                    color: root.th.text2
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
+                }
+                TextEdit {
+                    width: parent.width
+                    height: 32
+                    visible: root.shownPairCode !== ""
+                    text: root.shownPairCode
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere
+                    clip: true
+                    color: root.th.text
+                    font.family: root.th.fontMono
+                    font.pixelSize: root.th.fontSizeBody
+                }
+                Text {
+                    width: parent.width
+                    text: root.pairError
+                    visible: root.pairError !== ""
+                    color: root.th.danger
+                    wrapMode: Text.WordWrap
+                    font.family: root.th.fontFamily
+                    font.pixelSize: root.th.fontSizeSmall
                 }
             }
 
@@ -527,6 +654,16 @@ Item {
                 color: root.status.encrypted ? root.th.success : root.th.muted
                 wrapMode: Text.WordWrap
                 font.family: root.th.fontFamily
+                font.pixelSize: root.th.fontSizeCaption
+            }
+
+            Text {
+                width: parent.width
+                visible: root.status.fingerprint !== undefined && root.status.fingerprint !== null
+                text: "Sync fingerprint: " + (root.status.fingerprint || "").slice(0, 16)
+                color: root.th.muted
+                wrapMode: Text.WrapAnywhere
+                font.family: root.th.fontMono
                 font.pixelSize: root.th.fontSizeCaption
             }
 

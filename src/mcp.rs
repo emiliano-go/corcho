@@ -1764,6 +1764,17 @@ fn call_tool(core: &mut Core, name: &str, args: &Value, progress: ProgressFn) ->
             Ok(core.iroh.share(read_only)?)
         }
         "iroh.cache" => Ok(core.iroh.cache_ticket()?),
+        "iroh.pairCreate" => {
+            let setup = core.iroh.share(false)?;
+            Ok(crate::pairing::create(&setup)?)
+        }
+        "iroh.pairJoin" => {
+            let code = required(args, "code")?;
+            let setup = crate::pairing::take(&code)?;
+            core.iroh.join(&setup)?;
+            core.reload_from_disk()?;
+            Ok(core.iroh.status_json())
+        }
         "iroh.sync" => {
             report(progress, 0.3, "syncing peers");
             let status = core.iroh.sync_now()?;
@@ -3024,6 +3035,18 @@ fn tools() -> Vec<Value> {
         "Return a read-only cache ticket without the encryption key.",
         empty.clone(),
         vec![],
+    );
+    add(
+        "iroh.pairCreate",
+        "Upload the setup code under a six-word pairing code and return it.",
+        empty.clone(),
+        vec![],
+    );
+    add(
+        "iroh.pairJoin",
+        "Join a workspace using a six-word pairing code.",
+        json!({"code":{"type":"string"}}),
+        vec!["code"],
     );
     add(
         "iroh.sync",

@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -24,6 +25,10 @@ ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_PENDING = 512
 MAX_BODY = 4096
 LOCK = threading.Lock()
+PAIR_TTL = 600
+MAX_PAIRS = 64
+PAIR_LOCK = threading.Lock()
+PAIRS = {}
 
 
 def load(path):
@@ -52,6 +57,12 @@ def pending():
 
 def valid(endpoint_id):
     return bool(endpoint_id and ID_RE.match(endpoint_id))
+
+
+def purge_pairs():
+    now = time.monotonic()
+    for key in [key for key, (expires, _) in PAIRS.items() if expires <= now]:
+        PAIRS.pop(key, None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -139,6 +150,44 @@ class Handler(BaseHTTPRequestHandler):
                 waiting.append(endpoint_id)
                 save(PENDING, waiting)
             self.reply(202, json.dumps({"status": "pending"}))
+            return
+        if parsed.path in {"/pair", "/pair/take"}:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 32768:
+                self.reply(400, json.dumps({"error": "invalid body"}))
+                return
+            try:
+                body = json.loads(self.rfile.read(length))
+                lookup = body.get("lookup", "")
+            except (ValueError, AttributeError):
+                self.reply(400, json.dumps({"error": "invalid json"}))
+                return
+            if not valid(lookup):
+                self.reply(400, json.dumps({"error": "invalid lookup"}))
+                return
+            if parsed.path == "/pair":
+                blob = body.get("blob")
+                if not isinstance(blob, str) or not blob or len(blob) > 16384:
+                    self.reply(400, json.dumps({"error": "invalid blob"}))
+                    return
+                with PAIR_LOCK:
+                    purge_pairs()
+                    if lookup not in PAIRS and len(PAIRS) >= MAX_PAIRS:
+                        self.reply(429, json.dumps({"error": "pairing queue full"}))
+                        return
+                    PAIRS[lookup] = (time.monotonic() + PAIR_TTL, blob)
+                self.reply(201, json.dumps({"ok": True}))
+                return
+            with PAIR_LOCK:
+                purge_pairs()
+                entry = PAIRS.pop(lookup, None)
+            if entry is None:
+                self.reply(404, json.dumps({"error": "not found or expired"}))
+                return
+            self.reply(200, json.dumps({"blob": entry[1]}))
             return
         self.reply(404, json.dumps({"error": "not found"}))
 

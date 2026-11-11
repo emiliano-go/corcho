@@ -177,6 +177,15 @@ and attachments are sealed with a per-workspace key before they are published.
 The setup code carries that key, so treat it like a password. A cache ticket
 does not.
 
+Setup codes also carry a SHA-256 sync fingerprint. A device with a different
+sync format is rejected instead of merging records that could corrupt or drift
+the workspace. The wizard shows a short prefix of the fingerprint.
+
+For the shortest setup, use **Pair with words**: the first device uploads the
+encrypted setup code to the relay under a six-word code valid for ten minutes
+and one use, and the second device types that code. The word list is the BIP39
+English list.
+
 ### Relay
 
 Every device can share one redundant relay list instead of the public n0

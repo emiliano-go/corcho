@@ -58,4 +58,7 @@ is stopped.
 
 The relay calls `POST http://access:8090/authorize` with
 `X-Iroh-Endpoint-Id`; the access service is not exposed through Traefik except
-for `/access/request` and `/access/status`.
+for `/access/request`, `/access/status`, `/pair` and `/pair/take`.
+
+`/pair` stores an encrypted setup code for ten minutes and one use, keyed by a
+hash of a six-word code. The access service cannot decrypt it.

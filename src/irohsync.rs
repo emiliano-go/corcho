@@ -35,6 +35,7 @@ const STATE_FILE: &str = "sync-state.json";
 const ENDPOINT_KEY_FILE: &str = "endpoint.key";
 const DEBOUNCE: Duration = Duration::from_secs(2);
 const SETUP_PREFIX: &str = "corcho1:";
+const SETUP_PREFIX_V2: &str = "corcho2:";
 const KEY_LEN: usize = 32;
 
 pub type SnapshotFn = Arc<dyn Fn() -> Option<Workspace> + Send + Sync>;
@@ -345,6 +346,7 @@ impl IrohSync {
             "endpointId": status.endpoint_id,
             "relay": status.relay,
             "encrypted": encrypted,
+            "fingerprint": sync_fingerprint(),
             "clock": status.clock,
             "peers": status.peers,
             "lastSync": status.last_sync,
@@ -659,6 +661,15 @@ fn parse_relay_urls(raw: &str) -> Result<Vec<iroh::RelayUrl>> {
     Ok(urls)
 }
 
+/// The active relay base URL, without a trailing slash.
+pub fn relay_base_url() -> Option<String> {
+    configured_relays()
+        .ok()
+        .flatten()?
+        .first()
+        .map(|url| url.to_string().trim_end_matches('/').to_string())
+}
+
 /// The relay list saved by the user, without environment overrides.
 pub fn relay_url() -> String {
     let Ok(path) = relay_file_path() else {
@@ -888,7 +899,14 @@ async fn join_workspace(
     network: &Network,
     ticket: &str,
 ) -> Result<iroh_docs::api::Doc> {
-    let (parsed, incoming_key) = parse_setup_code(ticket)?;
+    let (parsed, incoming_key, fingerprint) = parse_setup_code(ticket)?;
+    if let Some(fingerprint) = fingerprint {
+        if fingerprint != sync_fingerprint() {
+            return Err(anyhow!(
+                "setup code uses a different sync version; update Corcho on both devices"
+            ));
+        }
+    }
     let writable = matches!(parsed.capability, iroh_docs::Capability::Write(_));
     let raw_ticket = encode_ticket(&parsed);
     let (doc, _events) = network
@@ -1198,6 +1216,20 @@ async fn pull_and_apply(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::
         decrypted.insert(key, (record, hash));
     }
 
+    if let Some((record, _)) = decrypted.get("sync/fingerprint") {
+        if let Some(value) = &record.value {
+            if let Some(fingerprint) = value.get("fp").and_then(|value| value.as_str()) {
+                if fingerprint != sync_fingerprint() {
+                    set_error(
+                        inner,
+                        "workspace sync version mismatch; update Corcho on both devices".into(),
+                    );
+                    return true;
+                }
+            }
+        }
+    }
+
     let mut to_apply: Vec<(String, Record)> = Vec::new();
     {
         let state = inner.state.lock().unwrap();
@@ -1417,6 +1449,7 @@ pub fn split_workspace(ws: &Workspace) -> BTreeMap<String, Value> {
         }
     }
     records.insert("settings".into(), syncable_settings(&ws.settings));
+    records.insert("sync/fingerprint".into(), json!({"fp": sync_fingerprint()}));
     records
 }
 
@@ -1741,28 +1774,61 @@ fn encode_key(key: &[u8; KEY_LEN]) -> String {
     URL_SAFE_NO_PAD.encode(key)
 }
 
+fn sync_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(b"corcho-sync-fingerprint");
+        hasher.update(SCHEMA.to_le_bytes());
+        hasher.update(b"record:2\0crypto:xchacha20poly1305\0setup:2\0pair:1");
+        format!("{:x}", hasher.finalize())
+    })
+}
+
 fn wrap_ticket(ticket: &str, key: Option<&[u8; KEY_LEN]>) -> String {
     match key {
-        Some(key) => format!("{SETUP_PREFIX}{}:{ticket}", encode_key(key)),
+        Some(key) => format!(
+            "{SETUP_PREFIX_V2}{}:{}:{ticket}",
+            encode_key(key),
+            sync_fingerprint()
+        ),
         None => ticket.to_string(),
     }
 }
 
-fn parse_setup_code(text: &str) -> Result<(iroh_docs::DocTicket, Option<[u8; KEY_LEN]>)> {
+fn parse_setup_code(
+    text: &str,
+) -> Result<(iroh_docs::DocTicket, Option<[u8; KEY_LEN]>, Option<String>)> {
     use iroh_tickets::Ticket;
     let text = text.trim();
-    if let Some(rest) = text.strip_prefix(SETUP_PREFIX) {
+    if let Some(rest) = text.strip_prefix(SETUP_PREFIX_V2) {
+        let mut parts = rest.splitn(3, ':');
+        let key_text = parts
+            .next()
+            .ok_or_else(|| anyhow!("invalid Corcho setup code"))?;
+        let fingerprint = parts
+            .next()
+            .filter(|value| value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()))
+            .ok_or_else(|| anyhow!("invalid Corcho setup fingerprint"))?;
+        let ticket_text = parts
+            .next()
+            .ok_or_else(|| anyhow!("invalid Corcho setup code"))?;
+        let key = decode_key(key_text)?;
+        let ticket = iroh_docs::DocTicket::decode_string(ticket_text)
+            .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))?;
+        Ok((ticket, Some(key), Some(fingerprint.to_string())))
+    } else if let Some(rest) = text.strip_prefix(SETUP_PREFIX) {
         let (key_text, ticket_text) = rest
             .split_once(':')
             .ok_or_else(|| anyhow!("invalid Corcho setup code"))?;
         let key = decode_key(key_text)?;
         let ticket = iroh_docs::DocTicket::decode_string(ticket_text)
             .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))?;
-        Ok((ticket, Some(key)))
+        Ok((ticket, Some(key), None))
     } else {
         let ticket = iroh_docs::DocTicket::decode_string(text)
             .map_err(|e| anyhow!("invalid Iroh ticket: {e}"))?;
-        Ok((ticket, None))
+        Ok((ticket, None, None))
     }
 }
 

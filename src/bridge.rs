@@ -433,6 +433,14 @@ pub mod qobject {
         fn iroh_cache_ticket(self: Pin<&mut Self>) -> QString;
 
         #[qinvokable]
+        #[cxx_name = "irohPairCreate"]
+        fn iroh_pair_create(self: Pin<&mut Self>) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "irohPairJoin"]
+        fn iroh_pair_join(self: Pin<&mut Self>, code: &QString) -> QString;
+
+        #[qinvokable]
         #[cxx_name = "irohLeave"]
         fn iroh_leave(self: Pin<&mut Self>) -> QString;
 
@@ -1911,6 +1919,45 @@ impl qobject::AppController {
             Err(err) => {
                 self.as_mut().notice(s("sync-error"), s(err.to_string()));
                 s("")
+            }
+        }
+    }
+
+    pub fn iroh_pair_create(mut self: Pin<&mut Self>) -> QString {
+        let iroh = self.as_ref().rust().core.lock().unwrap().iroh.clone();
+        let setup = match iroh.share(false) {
+            Ok(setup) => setup,
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                return s("");
+            }
+        };
+        match crate::pairing::create(&setup) {
+            Ok(code) => s(code),
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                s("")
+            }
+        }
+    }
+
+    pub fn iroh_pair_join(mut self: Pin<&mut Self>, code: &QString) -> QString {
+        let setup = match crate::pairing::take(&p(code)) {
+            Ok(setup) => setup,
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                return s(err.to_string());
+            }
+        };
+        let iroh = self.as_ref().rust().core.lock().unwrap().iroh.clone();
+        match iroh.join(&setup) {
+            Ok(_) => {
+                self.as_mut().refresh_all();
+                s("")
+            }
+            Err(err) => {
+                self.as_mut().notice(s("sync-error"), s(err.to_string()));
+                s(err.to_string())
             }
         }
     }
