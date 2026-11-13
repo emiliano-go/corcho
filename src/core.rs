@@ -1862,9 +1862,9 @@ fn kanban_aggregate_columns(ws: &Workspace) -> Vec<Value> {
                     continue;
                 };
                 let source = if card.title.is_empty() {
-                    "Kanban"
+                    grid.name.clone()
                 } else {
-                    card.title.as_str()
+                    format!("{} / {}", grid.name, card.title)
                 };
                 for item in items {
                     let Some(text) = item.get("text").and_then(|value| value.as_str()) else {
