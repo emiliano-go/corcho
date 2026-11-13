@@ -3,28 +3,6 @@ import QtQuick
 CardFrame {
     id: root
 
-    readonly property bool aggregate: card && card.aggregate === true
-    property var aggregateColumns: []
-
-    function reloadAggregate() {
-        if (!root.aggregate || !root.app)
-            return;
-        try {
-            root.aggregateColumns = JSON.parse(root.app.kanbanAggregateJson() || "[]");
-        } catch (e) {
-            root.aggregateColumns = [];
-        }
-    }
-
-    Timer {
-        interval: 2000
-        repeat: true
-        running: root.aggregate
-        onTriggered: root.reloadAggregate()
-    }
-
-    Component.onCompleted: if (root.aggregate) root.reloadAggregate()
-
     readonly property var links: {
         try { return (JSON.parse(root.app.calendarJson).dateLinks || []); }
         catch (e) { return []; }
@@ -45,8 +23,6 @@ CardFrame {
     }
 
     property var columns: {
-        if (root.aggregate)
-            return [];
         var c = card.columns ? card.columns : [];
         if (c.length === 0) {
             c = [
@@ -103,7 +79,6 @@ CardFrame {
         id: columnsRow
         anchors.fill: parent
         spacing: root.th.spaceSnug
-        visible: !root.aggregate
         Repeater {
             model: root.columns
 
@@ -268,84 +243,6 @@ CardFrame {
                 }
             }
         }
-    }
-
-    Row {
-        anchors.fill: parent
-        spacing: root.th.spaceSnug
-        visible: root.aggregate
-
-        Repeater {
-            model: root.aggregateColumns
-
-            delegate: Item {
-                required property var modelData
-                width: (parent.width - root.th.spaceSnug * Math.max(0, root.aggregateColumns.length - 1))
-                       / Math.max(1, root.aggregateColumns.length)
-                height: parent.height
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: root.th.radiusMenu
-                    color: root.th.surface
-                    border.width: root.th.borderWidth
-                    border.color: root.th.border
-                }
-
-                Column {
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: root.th.space2
-
-                    Text {
-                        text: modelData.title
-                        color: root.th.text2
-                        font.family: root.th.fontFamily
-                        font.pixelSize: root.th.fontSizeSmall
-                        font.weight: root.th.fontWeightMedium
-                    }
-
-                    ListView {
-                        width: parent.width
-                        height: parent.height - 24
-                        clip: true
-                        spacing: root.th.space1
-                        model: modelData.items
-
-                        delegate: Rectangle {
-                            required property var modelData
-                            width: ListView.view.width
-                            height: 34
-                            radius: root.th.radiusKeycap
-                            color: root.th.surfaceStrong
-
-                            Text {
-                                anchors.fill: parent
-                                anchors.leftMargin: 6
-                                anchors.rightMargin: 6
-                                verticalAlignment: Text.AlignVCenter
-                                text: modelData.text
-                                color: root.th.text
-                                font.family: root.th.fontFamily
-                                font.pixelSize: root.th.fontSizeSmall
-                                elide: Text.ElideRight
-                                wrapMode: Text.Wrap
-                                maximumLineCount: 2
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Text {
-        anchors.centerIn: parent
-        visible: root.aggregate && root.aggregateColumns.length === 0
-        text: "No Kanban items"
-        color: root.th.muted
-        font.family: root.th.fontFamily
-        font.pixelSize: root.th.fontSizeSmall
     }
 
 }

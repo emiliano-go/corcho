@@ -88,6 +88,9 @@ impl Core {
             last_saved: None,
             last_file_mtime,
         };
+        if core.refresh_aggregate_kanbans() {
+            let _ = core.save();
+        }
         core.adblock.set_enabled(core.ws.settings.ad_blocker);
         core.adblock.load_lists(&core.data_dir);
         if networking {
@@ -111,6 +114,7 @@ impl Core {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        self.refresh_aggregate_kanbans();
         self.ws.revision = self.ws.revision.saturating_add(1);
         storage::save_workspace(&self.data_dir, &self.ws)?;
         self.last_saved = Some(std::time::Instant::now());
@@ -126,6 +130,7 @@ impl Core {
     /// Persist a state that arrived from a peer. Does not mark it dirty, so it
     /// is not echoed back out as a local edit.
     pub fn save_remote(&mut self) -> Result<()> {
+        self.refresh_aggregate_kanbans();
         self.ws.revision = self.ws.revision.saturating_add(1);
         storage::save_workspace(&self.data_dir, &self.ws)?;
         self.last_saved = Some(std::time::Instant::now());
@@ -252,7 +257,35 @@ impl Core {
     }
 
     pub fn kanban_aggregate_json(&self) -> String {
-        kanban_aggregate(&self.ws)
+        serde_json::to_string(&kanban_aggregate_columns(&self.ws)).unwrap_or_else(|_| "[]".into())
+    }
+
+    pub fn refresh_aggregate_kanbans(&mut self) -> bool {
+        let columns = kanban_aggregate_columns(&self.ws);
+        let value = Value::Array(columns);
+        let mut changed = false;
+        for grid in &mut self.ws.grids {
+            for card in &mut grid.cards {
+                if card.kind != "kanban"
+                    || !card
+                        .payload
+                        .get("aggregate")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                if card.payload.get("columns") != Some(&value) {
+                    card.payload.insert("columns".into(), value.clone());
+                    changed = true;
+                }
+                if !card.locked {
+                    card.locked = true;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn grids_json(&self) -> String {
@@ -1784,7 +1817,7 @@ impl Drop for Core {
     }
 }
 
-fn kanban_aggregate(ws: &Workspace) -> String {
+fn kanban_aggregate_columns(ws: &Workspace) -> Vec<Value> {
     let mut columns: Vec<(String, String, Vec<Value>)> = Vec::new();
     for grid in &ws.grids {
         for card in &grid.cards {
@@ -1851,11 +1884,10 @@ fn kanban_aggregate(ws: &Workspace) -> String {
             }
         }
     }
-    let output = columns
+    columns
         .into_iter()
         .map(|(id, title, items)| json!({"id": id, "title": title, "items": items}))
-        .collect::<Vec<_>>();
-    serde_json::to_string(&output).unwrap_or_else(|_| "[]".into())
+        .collect::<Vec<_>>()
 }
 
 fn snapshot_before_remote(data_dir: &std::path::Path, ws: &Workspace) {
@@ -1991,8 +2023,7 @@ mod tests {
         );
         ws.grids[0].cards.push(a);
         ws.grids[0].cards.push(b);
-        let aggregate: Value = serde_json::from_str(&kanban_aggregate(&ws)).unwrap();
-        let text = aggregate.to_string();
+        let text = serde_json::to_string(&kanban_aggregate_columns(&ws)).unwrap();
         assert!(text.contains("Kestrel — Install in Laptop"));
         assert!(text.contains("Infra — Migrate Auth"));
     }
