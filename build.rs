@@ -11,6 +11,8 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=CORCHO_BUILD_SHA={sha}");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads/main");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 
     let mut qml_files: Vec<std::path::PathBuf> = std::fs::read_dir("qml")
         .expect("qml directory")
