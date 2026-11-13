@@ -1625,6 +1625,15 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
         }
         if let Some(id) = key.strip_prefix("grid/") {
             if deleted {
+                let protected = ws
+                    .grids
+                    .iter()
+                    .find(|g| g.id == id)
+                    .map(|g| !g.cards.is_empty())
+                    .unwrap_or(false);
+                if protected {
+                    continue;
+                }
                 if ws.grids.iter().any(|g| g.id == id) {
                     ws.grids.retain(|g| g.id != id);
                     changed = true;
@@ -1659,6 +1668,16 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
         }
         if let Some(id) = key.strip_prefix("card/") {
             if deleted {
+                let protected = ws
+                    .grids
+                    .iter()
+                    .flat_map(|grid| grid.cards.iter())
+                    .find(|card| card.id == id)
+                    .map(card_has_content)
+                    .unwrap_or(false);
+                if protected {
+                    continue;
+                }
                 let mut removed = false;
                 for grid in &mut ws.grids {
                     let len = grid.cards.len();
@@ -1785,6 +1804,10 @@ pub fn apply_records(ws: &mut Workspace, records: &[(String, Record)]) -> bool {
 
     let after = value_hash(&serde_json::to_value(&*ws).unwrap_or(Value::Null));
     changed || before != after
+}
+
+fn card_has_content(card: &Card) -> bool {
+    !card.title.is_empty() || !card.text.is_empty() || !card.payload.is_empty()
 }
 
 fn reorder_by_ids<T>(items: &mut Vec<T>, ids: &[String], id_of: impl Fn(&T) -> &str) {
@@ -2278,9 +2301,11 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_removes_card() {
+    fn tombstone_removes_empty_card() {
         let mut ws = Workspace::default();
-        let id = card(&mut ws, "gone");
+        let note = Card::new("note", 10.0, 20.0);
+        let id = note.id.clone();
+        ws.grids[0].cards.push(note);
         let records = vec![(
             format!("card/{id}"),
             Record {
@@ -2294,6 +2319,44 @@ mod tests {
         )];
         assert!(apply_records(&mut ws, &records));
         assert!(ws.grids.iter().all(|g| g.cards.is_empty()));
+    }
+
+    #[test]
+    fn remote_tombstones_keep_non_empty_cards_and_grids() {
+        let mut ws = Workspace::default();
+        let id = card(&mut ws, "keep me");
+        let grid_id = ws.grids[0].id.clone();
+        let records = vec![
+            (
+                format!("card/{id}"),
+                Record {
+                    v: SCHEMA,
+                    device: "dev".into(),
+                    clock: 2,
+                    deleted: true,
+                    value: None,
+                    sealed: None,
+                },
+            ),
+            (
+                format!("grid/{grid_id}"),
+                Record {
+                    v: SCHEMA,
+                    device: "dev".into(),
+                    clock: 3,
+                    deleted: true,
+                    value: None,
+                    sealed: None,
+                },
+            ),
+        ];
+        let _ = apply_records(&mut ws, &records);
+        assert!(ws.grids.iter().any(|g| g.id == grid_id));
+        assert!(ws
+            .grids
+            .iter()
+            .flat_map(|g| g.cards.iter())
+            .any(|c| c.id == id));
     }
 
     #[test]
