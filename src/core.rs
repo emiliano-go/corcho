@@ -251,6 +251,10 @@ impl Core {
         }
     }
 
+    pub fn kanban_aggregate_json(&self) -> String {
+        kanban_aggregate(&self.ws)
+    }
+
     pub fn grids_json(&self) -> String {
         serde_json::to_string(&self.ws.grids).unwrap_or_else(|_| "[]".into())
     }
@@ -1780,6 +1784,80 @@ impl Drop for Core {
     }
 }
 
+fn kanban_aggregate(ws: &Workspace) -> String {
+    let mut columns: Vec<(String, String, Vec<Value>)> = Vec::new();
+    for grid in &ws.grids {
+        for card in &grid.cards {
+            if card.kind != "kanban"
+                || card
+                    .payload
+                    .get("aggregate")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(source_columns) = card
+                .payload
+                .get("columns")
+                .and_then(|value| value.as_array())
+            else {
+                continue;
+            };
+            for column in source_columns {
+                let id = column
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let title = column
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&id)
+                    .to_string();
+                let index = columns
+                    .iter()
+                    .position(|(existing, _, _)| existing == &id)
+                    .unwrap_or_else(|| {
+                        columns.push((id.clone(), title, Vec::new()));
+                        columns.len() - 1
+                    });
+                let Some(items) = column.get("items").and_then(|value| value.as_array()) else {
+                    continue;
+                };
+                let source = if card.title.is_empty() {
+                    "Kanban"
+                } else {
+                    card.title.as_str()
+                };
+                for item in items {
+                    let Some(text) = item.get("text").and_then(|value| value.as_str()) else {
+                        continue;
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    columns[index].2.push(json!({
+                        "id": item.get("id").cloned().unwrap_or(Value::Null),
+                        "text": format!("{source} — {text}"),
+                        "source": source,
+                        "sourceCardId": card.id,
+                        "sourceItemId": item.get("id").cloned().unwrap_or(Value::Null),
+                    }));
+                }
+            }
+        }
+    }
+    let output = columns
+        .into_iter()
+        .map(|(id, title, items)| json!({"id": id, "title": title, "items": items}))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&output).unwrap_or_else(|_| "[]".into())
+}
+
 fn snapshot_before_remote(data_dir: &std::path::Path, ws: &Workspace) {
     let dir = storage::backups_dir(data_dir);
     if std::fs::create_dir_all(&dir).is_err() {
@@ -1893,6 +1971,30 @@ mod tests {
             .find(|grid| grid.name.ends_with("-conflict"))
             .expect("conflict grid");
         assert_eq!(conflict.cards.len(), 2);
+    }
+
+    #[test]
+    fn kanban_aggregate_merges_items_with_sources() {
+        let mut ws = Workspace::default();
+        ws.grids[0].cards.clear();
+        let mut a = Card::new("kanban", 0.0, 0.0);
+        a.title = "Kestrel".into();
+        a.payload.insert(
+            "columns".into(),
+            json!([{"id":"pending","title":"Pending","items":[{"id":"1","text":"Install in Laptop"}]}]),
+        );
+        let mut b = Card::new("kanban", 0.0, 0.0);
+        b.title = "Infra".into();
+        b.payload.insert(
+            "columns".into(),
+            json!([{"id":"backlog","title":"Backlog","items":[{"id":"2","text":"Migrate Auth"}]}]),
+        );
+        ws.grids[0].cards.push(a);
+        ws.grids[0].cards.push(b);
+        let aggregate: Value = serde_json::from_str(&kanban_aggregate(&ws)).unwrap();
+        let text = aggregate.to_string();
+        assert!(text.contains("Kestrel — Install in Laptop"));
+        assert!(text.contains("Infra — Migrate Auth"));
     }
 
     #[test]

@@ -55,8 +55,6 @@ Item {
         accessError = "";
         accessSaved = "";
         opened = true;
-        if (root.status.savedWorkspace && !root.status.enabled)
-            root.enableSync();
     }
 
     function close() {

@@ -297,6 +297,10 @@ pub mod qobject {
         fn templates_json(self: &Self) -> QString;
 
         #[qinvokable]
+        #[cxx_name = "kanbanAggregateJson"]
+        fn kanban_aggregate_json(self: &Self) -> QString;
+
+        #[qinvokable]
         #[cxx_name = "createGrid"]
         fn create_grid(self: Pin<&mut Self>, name: &QString) -> QString;
 
@@ -1424,6 +1428,11 @@ impl qobject::AppController {
     pub fn templates_json(&self) -> QString {
         let core = self.core.lock().unwrap();
         s(serde_json::to_string(&core.ws.templates).unwrap_or_else(|_| "[]".into()))
+    }
+
+    pub fn kanban_aggregate_json(&self) -> QString {
+        let core = self.core.lock().unwrap();
+        s(core.kanban_aggregate_json())
     }
 
     pub fn create_grid(mut self: Pin<&mut Self>, name: &QString) -> QString {
