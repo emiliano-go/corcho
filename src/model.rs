@@ -22,6 +22,7 @@ pub const CARD_KINDS: &[&str] = &[
     "pomodoro",
     "mpris",
     "file",
+    "git",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
