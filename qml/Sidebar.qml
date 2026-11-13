@@ -347,6 +347,18 @@ Item {
                 model: root.grids.filter(function (g) { return !g.folderId; })
                 delegate: gridRow
             }
+
+            DropArea {
+                width: listColumn.width
+                height: 28
+                onDropped: function (drop) {
+                    var id = drop.source && drop.source.modelData
+                        ? drop.source.modelData.id
+                        : drop.getDataAsString("text/plain");
+                    if (id)
+                        root.app.reorderGrid(id, "");
+                }
+            }
         }
     }
 
@@ -357,10 +369,18 @@ Item {
             id: row
             required property var modelData
             property bool hoveredNow: false
+            property bool dropTarget: false
 
             width: listColumn.width
             height: root.th.controlHeight
             activeFocusOnTab: true
+
+            Drag.active: gridDrag.active
+            Drag.source: row
+            Drag.dragType: Drag.Internal
+            Drag.mimeData: { "text/plain": modelData.id }
+            Drag.hotSpot.x: row.width / 2
+            Drag.hotSpot.y: row.height / 2
             Accessible.role: Accessible.Button
             Accessible.name: modelData.name + ", " + modelData.cards.length + " cards"
             Accessible.selected: root.activeGridId === modelData.id
@@ -422,6 +442,35 @@ Item {
                 onTapped: {
                     var p = mapToItem(null, row.width - 20, row.height);
                     root.gridMenuRequested(row.modelData, p.x, p.y);
+                }
+            }
+
+            DragHandler {
+                id: gridDrag
+                target: null
+                dragThreshold: 6
+            }
+
+            Rectangle {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 2
+                visible: row.dropTarget
+                color: root.th.accent
+            }
+
+            DropArea {
+                anchors.fill: parent
+                onEntered: row.dropTarget = true
+                onExited: row.dropTarget = false
+                onDropped: function (drop) {
+                    row.dropTarget = false;
+                    var id = drop.source && drop.source.modelData
+                        ? drop.source.modelData.id
+                        : drop.getDataAsString("text/plain");
+                    if (id && id !== modelData.id)
+                        root.app.reorderGrid(id, modelData.id);
                 }
             }
         }
