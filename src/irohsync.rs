@@ -37,6 +37,7 @@ const ENDPOINT_KEY_FILE: &str = "endpoint.key";
 const DEBOUNCE: Duration = Duration::from_secs(2);
 const SETUP_PREFIX: &str = "corcho1:";
 const SETUP_PREFIX_V2: &str = "corcho2:";
+const BUILD_SHA: &str = env!("CORCHO_BUILD_SHA");
 const KEY_LEN: usize = 32;
 
 pub type SnapshotFn = Arc<dyn Fn() -> Option<Workspace> + Send + Sync>;
@@ -920,12 +921,15 @@ async fn join_workspace(
     ticket: &str,
 ) -> Result<iroh_docs::api::Doc> {
     let (parsed, incoming_key, fingerprint) = parse_setup_code(ticket)?;
-    if let Some(fingerprint) = fingerprint {
-        if fingerprint != sync_fingerprint() {
-            return Err(anyhow!(
-                "setup code uses a different sync version; update Corcho on both devices"
-            ));
-        }
+    let Some(fingerprint) = fingerprint else {
+        return Err(anyhow!(
+            "this setup code came from an older Corcho; update both devices and share a new code"
+        ));
+    };
+    if fingerprint != sync_fingerprint() {
+        return Err(anyhow!(
+            "setup code uses a different build; update Corcho on both devices"
+        ));
     }
     let writable = matches!(parsed.capability, iroh_docs::Capability::Write(_));
     let raw_ticket = encode_ticket(&parsed);
@@ -1296,18 +1300,34 @@ async fn pull_and_apply(inner: &Arc<Inner>, network: &Network, doc: &iroh_docs::
         decrypted.insert(key, (record, hash));
     }
 
+    let local_device = inner
+        .state
+        .lock()
+        .map(|state| state.device.clone())
+        .unwrap_or_default();
+    let mut fingerprint_seen = false;
     if let Some((record, _)) = decrypted.get("sync/fingerprint") {
         if let Some(value) = &record.value {
             if let Some(fingerprint) = value.get("fp").and_then(|value| value.as_str()) {
-                if fingerprint != sync_fingerprint() {
+                fingerprint_seen = true;
+                if fingerprint != sync_fingerprint() && record.device != local_device {
                     set_error(
                         inner,
-                        "workspace sync version mismatch; update Corcho on both devices".into(),
+                        "workspace was written by a different Corcho build; update both devices"
+                            .into(),
                     );
                     return true;
                 }
             }
         }
+    }
+    if crypto_key.is_some() && !fingerprint_seen {
+        set_error(
+            inner,
+            "workspace is missing a sync fingerprint; update Corcho and share a new setup code"
+                .into(),
+        );
+        return true;
     }
 
     let mut to_apply: Vec<(String, Record)> = Vec::new();
@@ -1975,7 +1995,8 @@ fn sync_fingerprint() -> &'static str {
         let mut hasher = Sha256::new();
         hasher.update(b"corcho-sync-fingerprint");
         hasher.update(SCHEMA.to_le_bytes());
-        hasher.update(b"record:2\0crypto:xchacha20poly1305\0setup:2\0pair:1");
+        hasher.update(b"record:2\0crypto:xchacha20poly1305\0setup:2\0pair:1\0build:");
+        hasher.update(BUILD_SHA.as_bytes());
         format!("{:x}", hasher.finalize())
     })
 }

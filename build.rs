@@ -1,6 +1,17 @@
 use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=CORCHO_BUILD_SHA={sha}");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+
     let mut qml_files: Vec<std::path::PathBuf> = std::fs::read_dir("qml")
         .expect("qml directory")
         .flatten()
