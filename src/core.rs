@@ -101,8 +101,12 @@ impl Core {
 
     pub fn fallback() -> Self {
         let ws = Workspace::default();
+        let data_dir = std::env::temp_dir()
+            .join("corcho-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let _ = storage::ensure_dirs(&data_dir);
         Self {
-            data_dir: storage::default_data_dir(),
+            data_dir,
             history: History::new(ws.settings.undo_steps, ws.clone()),
             ws,
             adblock: Adblock::new(),
