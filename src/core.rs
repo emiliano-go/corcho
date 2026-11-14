@@ -1092,6 +1092,7 @@ impl Core {
                 .spawn("whiteboard")
                 .map(card_json)
                 .unwrap_or(Value::Null),
+            "create-legend" => self.spawn("legend").map(card_json).unwrap_or(Value::Null),
             "create-pomodoro" => self.spawn("pomodoro").map(card_json).unwrap_or(Value::Null),
             "create-mpris" => self.spawn("mpris").map(card_json).unwrap_or(Value::Null),
             "create-grid" => json!({"grid": self.create_grid("New Grid")}),
@@ -1538,9 +1539,187 @@ impl Core {
             if let Some(card) = self.ws.card_mut(id) {
                 if group.is_empty() {
                     card.payload.remove("group");
+                    card.payload.remove("group_name");
                 } else {
+                    let previous = card.str_field("group", "");
                     card.set("group", json!(group));
+                    if previous != group || card.str_field("group_name", "").is_empty() {
+                        card.set("group_name", json!("Group"));
+                    }
                 }
+            }
+        }
+        self.save_quiet();
+        true
+    }
+
+    /// Rename every card that belongs to `group_id`. Groups are only a visual
+    /// grouping, so the name is stored on the member cards and stays in sync
+    /// with the rest of the card payload.
+    pub fn rename_card_group(&mut self, group_id: &str, name: &str) -> bool {
+        let name = name.trim();
+        if group_id.is_empty() || name.is_empty() {
+            return false;
+        }
+        let exists = self
+            .ws
+            .grids
+            .iter()
+            .flat_map(|grid| &grid.cards)
+            .any(|card| card.str_field("group", "") == group_id);
+        if !exists {
+            return false;
+        }
+        self.checkpoint();
+        for grid in &mut self.ws.grids {
+            for card in &mut grid.cards {
+                if card.str_field("group", "") == group_id {
+                    card.set("group_name", json!(name));
+                }
+            }
+        }
+        self.save_quiet();
+        true
+    }
+
+    /// Remove a group without touching its cards. Links that pointed at the
+    /// group are removed too, because the group no longer exists.
+    pub fn delete_card_group(&mut self, group_id: &str) -> bool {
+        let group_id = group_id.trim();
+        if group_id.is_empty() {
+            return false;
+        }
+        let target = format!("group:{group_id}");
+        let exists = self
+            .ws
+            .grids
+            .iter()
+            .flat_map(|grid| &grid.cards)
+            .any(|card| card.str_field("group", "") == group_id || card_has_link_to(card, &target));
+        if !exists {
+            return false;
+        }
+        self.checkpoint();
+        for grid in &mut self.ws.grids {
+            for card in &mut grid.cards {
+                if card.str_field("group", "") == group_id {
+                    card.payload.remove("group");
+                    card.payload.remove("group_name");
+                }
+                remove_card_links_to(card, &target);
+            }
+        }
+        self.save_quiet();
+        true
+    }
+
+    /// Draw a visual connector from `source_id` to a card or a group. The
+    /// target is stored as a card id or `group:<id>`. New links inherit the
+    /// active entry of the grid's legend card, if there is one.
+    pub fn add_card_link(&mut self, source_id: &str, target: &str, bidirectional: bool) -> bool {
+        let target = target.trim();
+        if target.is_empty() || target == source_id {
+            return false;
+        }
+        let Some((source_grid, source_card)) = self.ws.card(source_id) else {
+            return false;
+        };
+        let grid_id = source_grid.id.clone();
+        let source_group = source_card.str_field("group", "");
+        let target_key = if let Some(group_id) = target.strip_prefix("group:") {
+            if group_id.is_empty() || group_id == source_group {
+                return false;
+            }
+            let Some(grid) = self.ws.grid(&grid_id) else {
+                return false;
+            };
+            if !grid
+                .cards
+                .iter()
+                .any(|card| card.str_field("group", "") == group_id)
+            {
+                return false;
+            }
+            format!("group:{group_id}")
+        } else {
+            let Some((target_grid, _)) = self.ws.card(target) else {
+                return false;
+            };
+            if target_grid.id != grid_id {
+                return false;
+            }
+            target.to_string()
+        };
+        let style = self
+            .ws
+            .grid(&grid_id)
+            .and_then(legend_active_style)
+            .unwrap_or_default();
+        self.checkpoint();
+        let Some(card) = self.ws.card_mut(source_id) else {
+            return false;
+        };
+        let mut links = card
+            .payload
+            .get("links")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut found = false;
+        for link in &mut links {
+            if link.get("to").and_then(Value::as_str) == Some(target_key.as_str()) {
+                link["double"] = json!(bidirectional);
+                link["style"] = json!(style);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            links.push(json!({
+                "to": target_key,
+                "double": bidirectional,
+                "style": style
+            }));
+        }
+        card.set("links", Value::Array(links));
+        self.save_quiet();
+        true
+    }
+
+    /// Remove all outgoing connectors from one card.
+    pub fn clear_card_links(&mut self, card_id: &str) -> bool {
+        let has_links = self
+            .ws
+            .card(card_id)
+            .and_then(|(_, card)| card.payload.get("links"))
+            .and_then(Value::as_array)
+            .is_some_and(|links| !links.is_empty());
+        if !has_links {
+            return false;
+        }
+        self.checkpoint();
+        if let Some(card) = self.ws.card_mut(card_id) {
+            card.payload.remove("links");
+        }
+        self.save_quiet();
+        true
+    }
+
+    /// Remove every connector that points at a card or group.
+    pub fn clear_incoming_links(&mut self, target: &str) -> bool {
+        let has_incoming = self
+            .ws
+            .grids
+            .iter()
+            .flat_map(|grid| &grid.cards)
+            .any(|card| card_has_link_to(card, target));
+        if !has_incoming {
+            return false;
+        }
+        self.checkpoint();
+        for grid in &mut self.ws.grids {
+            for card in &mut grid.cards {
+                remove_card_links_to(card, target);
             }
         }
         self.save_quiet();
@@ -1747,7 +1926,60 @@ fn populate_defaults(card: &mut Card, ws: &Workspace) {
         "mpris" => {
             card.set("playerName", json!(""));
         }
+        "legend" => {
+            card.set(
+                "entries",
+                json!([
+                    {"id":"supports","label":"Supports","color":"#86b78a","dashed":false},
+                    {"id":"relates","label":"Relates to","color":"#7aa2f7","dashed":false}
+                ]),
+            );
+            card.set("active", json!("supports"));
+        }
         _ => {}
+    }
+}
+
+fn legend_active_style(grid: &Grid) -> Option<String> {
+    grid.cards
+        .iter()
+        .filter(|card| card.kind == "legend")
+        .find_map(|card| {
+            card.payload
+                .get("active")
+                .and_then(Value::as_str)
+                .filter(|style| !style.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn card_has_link_to(card: &Card, target: &str) -> bool {
+    card.payload
+        .get("links")
+        .and_then(Value::as_array)
+        .is_some_and(|links| {
+            links
+                .iter()
+                .any(|link| link.get("to").and_then(Value::as_str) == Some(target))
+        })
+}
+
+fn remove_card_links_to(card: &mut Card, target: &str) {
+    let Some(links) = card.payload.get("links").and_then(Value::as_array) else {
+        return;
+    };
+    let kept: Vec<Value> = links
+        .iter()
+        .filter(|link| link.get("to").and_then(Value::as_str) != Some(target))
+        .cloned()
+        .collect();
+    if kept.len() == links.len() {
+        return;
+    }
+    if kept.is_empty() {
+        card.payload.remove("links");
+    } else {
+        card.set("links", Value::Array(kept));
     }
 }
 
@@ -2072,6 +2304,79 @@ mod tests {
         assert!(core.unsync_card(&a.id));
         let (_, other) = core.ws.card(&b.id).unwrap();
         assert!(other.get("syncId").is_none());
+    }
+
+    #[test]
+    fn groups_can_be_named_and_deleted_without_deleting_cards() {
+        let mut core = Core::fallback();
+        let a = core.create_card("note", 0.0, 0.0).unwrap();
+        let b = core.create_card("note", 100.0, 0.0).unwrap();
+        let c = core.create_card("note", 200.0, 0.0).unwrap();
+        assert!(core.set_cards_group(&[a.id.clone(), b.id.clone()], "g1"));
+        assert!(core.rename_card_group("g1", "Research"));
+
+        for id in [&a.id, &b.id] {
+            let (_, card) = core.ws.card(id).unwrap();
+            assert_eq!(card.str_field("group", ""), "g1");
+            assert_eq!(card.str_field("group_name", ""), "Research");
+        }
+
+        assert!(core.add_card_link(&c.id, "group:g1", false));
+        assert!(core.delete_card_group("g1"));
+
+        assert!(core.ws.card(&a.id).is_some());
+        assert!(core.ws.card(&b.id).is_some());
+        for id in [&a.id, &b.id] {
+            let (_, card) = core.ws.card(id).unwrap();
+            assert!(card.get("group").is_none());
+            assert!(card.get("group_name").is_none());
+        }
+        let (_, c_now) = core.ws.card(&c.id).unwrap();
+        assert!(c_now.get("links").is_none());
+    }
+
+    #[test]
+    fn links_use_the_active_legend_style_and_clear() {
+        let mut core = Core::fallback();
+        let legend = core.create_card("legend", 0.0, 0.0).unwrap();
+        let a = core.create_card("note", 100.0, 0.0).unwrap();
+        let b = core.create_card("note", 200.0, 0.0).unwrap();
+        let c = core.create_card("note", 300.0, 0.0).unwrap();
+
+        assert!(core.add_card_link(&a.id, &b.id, false));
+        let (_, a_now) = core.ws.card(&a.id).unwrap();
+        let links = a_now.get("links").unwrap().as_array().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["to"], json!(b.id));
+        assert_eq!(links[0]["style"], json!("supports"));
+        assert_eq!(links[0]["double"], json!(false));
+
+        assert!(core.add_card_link(&a.id, &b.id, true));
+        let (_, a_now) = core.ws.card(&a.id).unwrap();
+        assert_eq!(a_now.get("links").unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(a_now.get("links").unwrap()[0]["double"], json!(true));
+
+        assert!(core.update_card_json(
+            &json!({"id": legend.id, "payload": {"active": "relates"}}).to_string()
+        ));
+        assert!(core.add_card_link(&b.id, &a.id, false));
+        let (_, b_now) = core.ws.card(&b.id).unwrap();
+        assert_eq!(b_now.get("links").unwrap()[0]["style"], json!("relates"));
+
+        assert!(core.set_cards_group(&[a.id.clone(), b.id.clone()], "g1"));
+        assert!(core.add_card_link(&c.id, "group:g1", true));
+        assert!(core.clear_incoming_links("group:g1"));
+        let (_, c_now) = core.ws.card(&c.id).unwrap();
+        assert!(c_now.get("links").is_none());
+        assert!(core.ws.card(&a.id).is_some());
+
+        assert!(core.clear_card_links(&a.id));
+        let (_, a_now) = core.ws.card(&a.id).unwrap();
+        assert!(a_now.get("links").is_none());
+
+        core.create_grid("Other");
+        let other = core.create_card("note", 0.0, 0.0).unwrap();
+        assert!(!core.add_card_link(&other.id, &a.id, false));
     }
 
     #[test]

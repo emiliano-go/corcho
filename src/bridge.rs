@@ -260,6 +260,31 @@ pub mod qobject {
         fn set_card_group(self: Pin<&mut Self>, ids_json: &QString, group: &QString) -> bool;
 
         #[qinvokable]
+        #[cxx_name = "renameCardGroup"]
+        fn rename_card_group(self: Pin<&mut Self>, group_id: &QString, name: &QString) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "deleteCardGroup"]
+        fn delete_card_group(self: Pin<&mut Self>, group_id: &QString) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "addCardLink"]
+        fn add_card_link(
+            self: Pin<&mut Self>,
+            source_id: &QString,
+            target: &QString,
+            bidirectional: bool,
+        ) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "clearCardLinks"]
+        fn clear_card_links(self: Pin<&mut Self>, card_id: &QString) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "clearIncomingLinks"]
+        fn clear_incoming_links(self: Pin<&mut Self>, target: &QString) -> bool;
+
+        #[qinvokable]
         #[qinvokable]
         #[cxx_name = "syncCards"]
         fn sync_cards(self: Pin<&mut Self>, source_id: &QString, target_id: &QString) -> bool;
@@ -1298,6 +1323,61 @@ impl qobject::AppController {
             let core_arc = self.as_ref().rust().core.clone();
             let mut core = core_arc.lock().unwrap();
             core.set_cards_group(&ids, &p(group))
+        };
+        self.as_mut().refresh_cards();
+        ok
+    }
+
+    pub fn rename_card_group(mut self: Pin<&mut Self>, group_id: &QString, name: &QString) -> bool {
+        let ok = {
+            let core_arc = self.as_ref().rust().core.clone();
+            let mut core = core_arc.lock().unwrap();
+            core.rename_card_group(&p(group_id), &p(name))
+        };
+        self.as_mut().refresh_cards();
+        ok
+    }
+
+    pub fn delete_card_group(mut self: Pin<&mut Self>, group_id: &QString) -> bool {
+        let ok = {
+            let core_arc = self.as_ref().rust().core.clone();
+            let mut core = core_arc.lock().unwrap();
+            core.delete_card_group(&p(group_id))
+        };
+        self.as_mut().refresh_cards();
+        ok
+    }
+
+    pub fn add_card_link(
+        mut self: Pin<&mut Self>,
+        source_id: &QString,
+        target: &QString,
+        bidirectional: bool,
+    ) -> bool {
+        let ok = {
+            let core_arc = self.as_ref().rust().core.clone();
+            let mut core = core_arc.lock().unwrap();
+            core.add_card_link(&p(source_id), &p(target), bidirectional)
+        };
+        self.as_mut().refresh_cards();
+        ok
+    }
+
+    pub fn clear_card_links(mut self: Pin<&mut Self>, card_id: &QString) -> bool {
+        let ok = {
+            let core_arc = self.as_ref().rust().core.clone();
+            let mut core = core_arc.lock().unwrap();
+            core.clear_card_links(&p(card_id))
+        };
+        self.as_mut().refresh_cards();
+        ok
+    }
+
+    pub fn clear_incoming_links(mut self: Pin<&mut Self>, target: &QString) -> bool {
+        let ok = {
+            let core_arc = self.as_ref().rust().core.clone();
+            let mut core = core_arc.lock().unwrap();
+            core.clear_incoming_links(&p(target))
         };
         self.as_mut().refresh_cards();
         ok

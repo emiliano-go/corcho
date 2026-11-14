@@ -401,6 +401,7 @@ FocusScope {
             id: mover
             target: null
             enabled: !root.card.locked && !root.editingTitle && !root.floating && !root.detached
+                && !(root.canvasView && root.canvasView.linkSourceId !== "")
             grabPermissions: PointerHandler.CanTakeOverFromAnything
             cursorShape: root.dragCursorShape
             property real lastX: 0

@@ -9,6 +9,10 @@ Item {
     property var cards: []
     property string selectedId: ""
     property var selectedIds: []
+    // While non-empty, the canvas is waiting for the user to click a card or
+    // group to finish a connector.
+    property string linkSourceId: ""
+    property bool linkDouble: false
     // Cards currently shown in picture-in-picture windows. Their canvas
     // delegates stay in place as greyed-out placeholders.
     property var floatingIds: []
@@ -114,6 +118,10 @@ Item {
         // clicking or dragging the top card would also affect the card
         // underneath it.
         if (!root.isTopCardAtScene(id, sceneX, sceneY)) return;
+        if (root.linkSourceId !== "") {
+            root.finishCardLink(id);
+            return;
+        }
         // Raising is only for a plain click with at most one card selected.
         // Additive clicks and clicks while a multi-selection is active must
         // leave the stacking order alone.
@@ -127,6 +135,37 @@ Item {
         }
         setSelection(list);
         if (!additive && !multi) root.raiseCard(id);
+    }
+
+    function beginCardLink(sourceId, bidirectional) {
+        if (!sourceId) return;
+        root.linkSourceId = sourceId;
+        root.linkDouble = !!bidirectional;
+    }
+
+    function cancelCardLink() {
+        root.linkSourceId = "";
+        root.linkDouble = false;
+    }
+
+    function finishCardLink(target) {
+        var source = root.linkSourceId;
+        var double = root.linkDouble;
+        root.cancelCardLink();
+        if (!source || !target || target === source) return;
+        root.app.addCardLink(source, target, double);
+    }
+
+    function groupCards(groupId) {
+        var ids = [];
+        for (var i = 0; i < root.cards.length; i++)
+            if (root.cards[i].group === groupId) ids.push(root.cards[i].id);
+        return ids;
+    }
+
+    function selectGroup(groupId) {
+        var ids = root.groupCards(groupId);
+        if (ids.length > 0) root.setSelection(ids);
     }
 
     function marqueeSelection() {
@@ -208,23 +247,25 @@ Item {
             var c = cards[i];
             if (!c.group) continue;
             var g = groups[c.group];
-            if (!g) g = groups[c.group] = { id: c.group, x: c.x, y: c.y, right: c.x + c.width, bottom: c.y + c.height };
+            if (!g) g = groups[c.group] = { id: c.group, name: c.group_name || "Group", x: c.x, y: c.y, right: c.x + c.width, bottom: c.y + c.height };
             else {
                 g.x = Math.min(g.x, c.x);
                 g.y = Math.min(g.y, c.y);
                 g.right = Math.max(g.right, c.x + c.width);
                 g.bottom = Math.max(g.bottom, c.y + c.height);
+                if ((!g.name || g.name === "Group") && c.group_name) g.name = c.group_name;
             }
         }
         var out = [];
         for (var key in groups) {
             var b = groups[key];
-            out.push({ x: b.x - 12, y: b.y - 28, width: b.right - b.x + 24, height: b.bottom - b.y + 40 });
+            out.push({ id: b.id, name: b.name, x: b.x - 12, y: b.y - 28, width: b.right - b.x + 24, height: b.bottom - b.y + 40 });
         }
         return out;
     }
 
     signal menuRequested(var card, real globalX, real globalY)
+    signal groupMenuRequested(string groupId, string name, real globalX, real globalY)
     signal dateLinkRequested(string sourceCardId, string sourceItemId, string linkId, string defaultDate)
     signal calendarManagerRequested()
     signal returnCardRequested(string id)
@@ -303,6 +344,7 @@ Item {
         case "mpris": return "CardBodyMpris.qml";
         case "file": return "CardBodyFile.qml";
         case "git": return "CardBodyGit.qml";
+        case "legend": return "CardBodyLegend.qml";
         default: return "CardBodyNote.qml";
         }
     }
@@ -686,6 +728,10 @@ Item {
         onCanceled: longPressTimer.stop()
         onClicked: function (mouse) {
             if (mouse.button === Qt.LeftButton && longPressFired) return;
+            if (mouse.button === Qt.LeftButton && root.linkSourceId !== "") {
+                root.cancelCardLink();
+                return;
+            }
             if (mouse.button === Qt.LeftButton && root.settings && root.settings.grid_ripple && !root.settings.reduced_motion) {
                 ripple.x = mouse.x - 24;
                 ripple.y = mouse.y - 24;
@@ -728,7 +774,64 @@ Item {
                 border.width: 2
                 border.color: Qt.alpha(root.th.accent, 0.55)
                 z: 0
+
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: root.linkSourceId !== ""
+                    cursorShape: Qt.CrossCursor
+                    onClicked: root.finishCardLink("group:" + modelData.id)
+                }
+
+                Rectangle {
+                    id: groupHeader
+                    x: 8
+                    y: 4
+                    width: Math.min(parent.width - 16, Math.max(80, groupName.implicitWidth + 24))
+                    height: 22
+                    radius: root.th.radiusControl
+                    color: Qt.alpha(root.th.bg, 0.82)
+                    border.width: 1
+                    border.color: Qt.alpha(root.th.accent, 0.35)
+                    z: 1
+
+                    Text {
+                        id: groupName
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        verticalAlignment: Text.AlignVCenter
+                        text: modelData.name || "Group"
+                        color: root.th.text
+                        font.family: root.th.fontFamily
+                        font.pixelSize: root.th.fontSizeSmall
+                        font.weight: root.th.fontWeightMedium
+                        elide: Text.ElideRight
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        cursorShape: root.linkSourceId !== "" ? Qt.CrossCursor : Qt.PointingHandCursor
+                        onClicked: function (mouse) {
+                            if (mouse.button === Qt.RightButton) {
+                                var p = mapToItem(null, mouse.x, mouse.y);
+                                root.groupMenuRequested(modelData.id, modelData.name || "Group", p.x, p.y);
+                            } else if (root.linkSourceId !== "") {
+                                root.finishCardLink("group:" + modelData.id);
+                            } else {
+                                root.selectGroup(modelData.id);
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        CardArrows {
+            cards: root.cards
+            groups: root.groupBounds
+            th: root.th
+            z: 0.5
         }
 
         Repeater {
@@ -783,6 +886,43 @@ Item {
                         root.calendarManagerRequested();
                     });
                 }
+            }
+        }
+    }
+
+    Rectangle {
+        id: linkBanner
+        visible: root.linkSourceId !== ""
+        anchors.top: parent.top
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.topMargin: 12
+        width: linkBannerRow.implicitWidth + 24
+        height: 40
+        radius: root.th.radiusControl
+        color: root.th.surfaceStrong
+        border.width: root.th.borderWidthStrong
+        border.color: root.th.accent
+        z: 200
+
+        Row {
+            id: linkBannerRow
+            anchors.centerIn: parent
+            spacing: root.th.space2
+
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.linkDouble
+                    ? "Click a card or group to draw a two-way arrow"
+                    : "Click a card or group to draw an arrow"
+                color: root.th.text
+                font.family: root.th.fontFamily
+                font.pixelSize: root.th.fontSizeSmall
+            }
+
+            AppButton {
+                th: root.th
+                text: "Cancel"
+                onClicked: root.cancelCardLink()
             }
         }
     }

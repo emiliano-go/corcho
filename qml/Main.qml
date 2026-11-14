@@ -84,8 +84,11 @@ ApplicationWindow {
     property var templateTarget: []
     property var menuGrid: null
     property var menuFolder: null
+    property var menuGroup: null
     property var menuWorld: ({ x: 0, y: 0 })
     property var renameTarget: ({ kind: "", id: "" })
+    property var pendingGroupIds: []
+    property string pendingGroupId: ""
     // Card id -> FloatingCardWindow. Reassigned whenever it changes so QML
     // bindings that depend on the id list are notified.
     property var floatingCards: ({})
@@ -305,7 +308,8 @@ ApplicationWindow {
                 { label: "Note", icon: "file-text", action: "create:note" },
                 { label: "Checklist", icon: "list-checks", action: "create:checklist" },
                 { label: "Kanban", icon: "kanban", action: "create:kanban" },
-                { label: "Whiteboard", icon: "pencil", action: "create:whiteboard" }
+                { label: "Whiteboard", icon: "pencil", action: "create:whiteboard" },
+                { label: "Legend", icon: "list", action: "create:legend" }
             ] },
             { label: "Web", icon: "globe", children: [
                 { label: "Website", icon: "globe", action: "create:website" },
@@ -374,6 +378,19 @@ ApplicationWindow {
             if (root.floatingIds.indexOf(selectedCards[s].id) < 0) allFloating = false;
         }
         menuLockTarget = !allLocked;
+        var groupId = allGrouped ? selectedCards[0].group : "";
+        root.menuGroup = allGrouped
+            ? { id: groupId, name: selectedCards[0].group_name || "Group" }
+            : null;
+        var incoming = 0;
+        if (!multi) {
+            for (var inc = 0; inc < allCards.length; inc++) {
+                var incLinks = allCards[inc].links || [];
+                for (var il = 0; il < incLinks.length; il++)
+                    if (incLinks[il].to === card.id) incoming++;
+            }
+        }
+        var outgoing = (card.links || []).length;
 
         var actions = [];
         if (allFloating) {
@@ -401,10 +418,23 @@ ApplicationWindow {
             icon: menuLockTarget ? "pin" : "pin-off",
             action: "card:lock"
         });
+        if (!multi) {
+            actions.push({ separator: true, label: "" });
+            actions.push({ label: "Connect one-way arrow…", icon: "arrow-right", action: "card:link-one" });
+            actions.push({ label: "Connect two-way arrow…", icon: "arrow-up-down", action: "card:link-two" });
+            if (outgoing > 0)
+                actions.push({ label: "Clear outgoing arrows", icon: "eraser", action: "card:clear-links" });
+            if (incoming > 0)
+                actions.push({ label: "Clear incoming arrows", icon: "eraser", action: "card:clear-incoming" });
+            actions.push({ separator: true, label: "" });
+        }
         if (multi)
             actions.push({ label: "Create group", icon: "group", action: "card:group" });
-        if (allGrouped)
+        if (allGrouped) {
+            actions.push({ label: "Rename group", icon: "square-pen", action: "group:rename" });
+            actions.push({ label: "Delete group (keep cards)", icon: "ungroup", action: "group:delete" });
             actions.push({ label: multi ? "Ungroup cards" : "Ungroup", icon: "ungroup", action: "card:ungroup" });
+        }
         if (allSynced) {
             actions.push({ label: multi ? "Stop syncing cards" : "Stop syncing", icon: "unlink", action: "card:unsync" });
         } else if (!multi) {
@@ -443,6 +473,21 @@ ApplicationWindow {
             action: "card:delete",
             danger: true
         });
+        showMenu(px, py, actions);
+    }
+
+    function openGroupMenu(groupId, name, px, py) {
+        root.menuGroup = { id: groupId, name: name || "Group", incoming: 0 };
+        var target = "group:" + groupId;
+        for (var i = 0; i < allCards.length; i++) {
+            var links = allCards[i].links || [];
+            for (var l = 0; l < links.length; l++)
+                if (links[l].to === target) root.menuGroup.incoming++;
+        }
+        var actions = [{ label: "Rename group", icon: "square-pen", action: "group:rename" }];
+        if (root.menuGroup.incoming > 0)
+            actions.push({ label: "Clear arrows to group", icon: "eraser", action: "group:clear-incoming" });
+        actions.push({ label: "Delete group (keep cards)", icon: "ungroup", action: "group:delete" });
         showMenu(px, py, actions);
     }
 
@@ -511,8 +556,19 @@ ApplicationWindow {
             } else if (arg === "lock") {
                 for (var l = 0; l < ids.length; l++)
                     app.updateCard(JSON.stringify({ id: ids[l], locked: root.menuLockTarget }));
+            } else if (arg === "link-one") {
+                canvas.beginCardLink(menuCard.id, false);
+            } else if (arg === "link-two") {
+                canvas.beginCardLink(menuCard.id, true);
+            } else if (arg === "clear-links") {
+                app.clearCardLinks(menuCard.id);
+            } else if (arg === "clear-incoming") {
+                app.clearIncomingLinks(menuCard.id);
             } else if (arg === "group") {
-                app.setCardGroup(JSON.stringify(ids), "g" + Date.now());
+                root.pendingGroupIds = ids.slice();
+                root.pendingGroupId = "g" + Date.now();
+                root.promptKind = "group-create";
+                prompt.open("Name group", "Group", "Group name");
             } else if (arg === "ungroup") {
                 app.setCardGroup(JSON.stringify(ids), "");
             } else if (arg === "unsync") {
@@ -534,6 +590,19 @@ ApplicationWindow {
                 var gridId = arg.slice(5);
                 for (var send = 0; send < ids.length; send++) app.sendCardToGrid(ids[send], gridId);
                 canvas.setSelection([]);
+            }
+            return;
+        }
+
+        if (kind === "group" && menuGroup) {
+            if (arg === "rename") {
+                root.pendingGroupId = menuGroup.id;
+                root.promptKind = "group-rename";
+                prompt.open("Rename group", menuGroup.name, "Group name");
+            } else if (arg === "delete") {
+                app.deleteCardGroup(menuGroup.id);
+            } else if (arg === "clear-incoming") {
+                app.clearIncomingLinks("group:" + menuGroup.id);
             }
             return;
         }
@@ -620,7 +689,8 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         onActivated: {
-            if (irohWizard.opened) irohWizard.close();
+            if (canvas.linkSourceId !== "") canvas.cancelCardLink();
+            else if (irohWizard.opened) irohWizard.close();
             else if (dateLinkDialog.opened) dateLinkDialog.close();
             else if (calendarManager.opened) calendarManager.close();
             else if (prompt.opened) prompt.close();
@@ -779,6 +849,7 @@ ApplicationWindow {
                 floatingIds: root.floatingIds
                 modalOpen: root.modalOpen
                 onMenuRequested: function (card, x, y) { root.openCardMenu(card, x, y) }
+                onGroupMenuRequested: function (groupId, name, x, y) { root.openGroupMenu(groupId, name, x, y) }
                 onDateLinkRequested: function (cardId, itemId, linkId, date) {
                     dateLinkDialog.openFor(cardId, itemId, linkId, date);
                 }
@@ -903,10 +974,31 @@ ApplicationWindow {
                 if (raw.indexOf("error:") === 0) toastHost.show("error", raw.slice(6));
                 return;
             }
+            if (root.promptKind === "group-create") {
+                var groupId = root.pendingGroupId;
+                var groupIds = root.pendingGroupIds.slice();
+                root.promptKind = "";
+                app.setCardGroup(JSON.stringify(groupIds), groupId);
+                app.renameCardGroup(groupId, text.trim());
+                root.pendingGroupIds = [];
+                root.pendingGroupId = "";
+                return;
+            }
+            if (root.promptKind === "group-rename") {
+                var renameGroupId = root.pendingGroupId;
+                root.promptKind = "";
+                root.pendingGroupId = "";
+                app.renameCardGroup(renameGroupId, text.trim());
+                return;
+            }
             if (root.renameTarget.kind === "grid") app.renameGrid(root.renameTarget.id, text.trim());
             else if (root.renameTarget.kind === "folder") app.renameFolder(root.renameTarget.id, text.trim());
         }
-        onCancelled: {}
+        onCancelled: {
+            root.promptKind = "";
+            root.pendingGroupIds = [];
+            root.pendingGroupId = "";
+        }
     }
 
     DateLinkDialog {

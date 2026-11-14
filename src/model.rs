@@ -23,6 +23,7 @@ pub const CARD_KINDS: &[&str] = &[
     "mpris",
     "file",
     "git",
+    "legend",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,6 +116,7 @@ pub fn default_card_style(kind: &str) -> (f64, f64, &'static str, &'static str, 
         "mpris" => (384.0, 192.0, "#333842", "music", "Now Playing"),
         "file" => (480.0, 420.0, "#333a3d", "file-text", ""),
         "git" => (440.0, 320.0, "#26343a", "git-branch", "Git"),
+        "legend" => (320.0, 280.0, "#333a3d", "list", "Legend"),
         _ => (320.0, 240.0, "#3d3f52", "square", ""),
     }
 }

@@ -2661,7 +2661,7 @@ fn property_description(key: &str) -> &'static str {
         "toneMix" => "Noise/tone mix from 0 (noise) to 1 (tone).",
         "sourceCardId" => "Optional card that owns the date.",
         "sourceItemId" => "Optional checklist or kanban item that owns the date.",
-        "kind" => "Card kind: note, website, bookmark, api, ai, script, calendar, timbre, portal, checklist, kanban, whiteboard, pomodoro, mpris or file.",
+        "kind" => "Card kind: note, website, bookmark, api, ai, script, calendar, timbre, portal, checklist, kanban, whiteboard, pomodoro, mpris, file, git or legend.",
         "x" | "y" => "Canvas coordinate in world units.",
         "width" | "height" => "Size in canvas units.",
         "title" => "Human-readable title.",

@@ -50,6 +50,7 @@ Item {
         { id: "create-checklist", label: "Add checklist", icon: "list-checks", keywords: "todo tasks" },
         { id: "create-kanban", label: "Add kanban", icon: "kanban", keywords: "board columns" },
         { id: "create-whiteboard", label: "Add whiteboard", icon: "pencil", keywords: "draw" },
+        { id: "create-legend", label: "Add legend", icon: "list", keywords: "arrows connectors meaning" },
         { id: "create-pomodoro", label: "Add pomodoro", icon: "timer", keywords: "timer focus" },
         { id: "create-mpris", label: "Add now playing", icon: "music-2", keywords: "music media" },
         { id: "create-grid", label: "Create grid", icon: "layout-grid", keywords: "new grid" },
