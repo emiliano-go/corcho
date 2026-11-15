@@ -150,10 +150,10 @@ Item {
 
     function finishCardLink(target) {
         var source = root.linkSourceId;
-        var double = root.linkDouble;
+        var bidirectional = root.linkDouble;
         root.cancelCardLink();
         if (!source || !target || target === source) return;
-        root.app.addCardLink(source, target, double);
+        root.app.addCardLink(source, target, bidirectional);
     }
 
     function groupCards(groupId) {
