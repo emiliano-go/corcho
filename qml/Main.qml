@@ -342,6 +342,12 @@ ApplicationWindow {
         return card;
     }
 
+    function createCardFromDoubleClick(wx, wy) {
+        var kind = root.settings.double_click_creates || "note";
+        if (kind === "none") return;
+        root.createCard(kind, wx, wy);
+    }
+
     function openCreateMenu(px, py, wx, wy) {
         menuWorld = { x: wx, y: wy };
         showMenu(px, py, [
@@ -856,7 +862,7 @@ ApplicationWindow {
                 onCalendarManagerRequested: calendarManager.open()
                 onReturnCardRequested: function (id) { root.closeFloatingCard(id) }
                 onBackgroundMenuRequested: function (gx, gy, wx, wy) { root.openCanvasMenu(gx, gy, wx, wy) }
-                onCreateRequested: function (wx, wy) { root.createCard("note", wx, wy) }
+                onCreateRequested: function (wx, wy) { root.createCardFromDoubleClick(wx, wy) }
             }
 
             Rectangle {
@@ -879,7 +885,9 @@ ApplicationWindow {
                     spacing: root.th.space2
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "Double-click to create"
+                        text: (root.settings.double_click_creates || "note") === "none"
+                            ? "Double-click creation off"
+                            : "Double-click to create"
                         color: root.th.muted
                         font.family: root.th.fontFamily
                         font.pixelSize: root.th.fontSizeSmall

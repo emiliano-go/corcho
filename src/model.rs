@@ -229,6 +229,7 @@ pub struct Settings {
     pub show_card_tooltips: bool,
     pub whiteboard_pressure: bool,
     pub canvas_long_press_menu: bool,
+    pub double_click_creates: String,
     pub ad_blocker: bool,
     pub web_shared_profile: bool,
     pub web_sleep_minutes: u32,
@@ -303,6 +304,7 @@ impl Default for Settings {
             show_card_tooltips: t(),
             whiteboard_pressure: t(),
             canvas_long_press_menu: t(),
+            double_click_creates: "note".into(),
             ad_blocker: false,
             web_shared_profile: t(),
             web_sleep_minutes: 10,
@@ -751,6 +753,13 @@ mod tests {
         assert!(Settings::default().canvas_long_press_menu);
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert!(old.canvas_long_press_menu);
+    }
+
+    #[test]
+    fn double_click_create_defaults_to_note_for_old_workspaces() {
+        assert_eq!(Settings::default().double_click_creates, "note");
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.double_click_creates, "note");
     }
 
     #[test]

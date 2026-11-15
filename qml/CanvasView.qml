@@ -942,7 +942,9 @@ Item {
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "Double-click anywhere, or create your first card"
+            text: root.settings && (root.settings.double_click_creates || "note") === "none"
+                ? "Create your first card"
+                : "Double-click anywhere, or create your first card"
             color: root.th.muted
             font.family: root.th.fontFamily
             font.pixelSize: root.th.fontSizeBody
