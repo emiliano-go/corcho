@@ -345,6 +345,15 @@ ApplicationWindow {
     function createCardFromDoubleClick(wx, wy) {
         var kind = root.settings.double_click_creates || "note";
         if (kind === "none") return;
+        menuWorld = { x: wx, y: wy };
+        if (kind === "file") {
+            pinFileDialog.open();
+            return;
+        }
+        if (kind === "folder") {
+            pinFolderDialog.open();
+            return;
+        }
         root.createCard(kind, wx, wy);
     }
 

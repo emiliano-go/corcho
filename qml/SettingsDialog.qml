@@ -580,8 +580,24 @@ Item {
                                     th: root.th
                                     value: root.val("double_click_creates", "note")
                                     options: [
-                                        { value: "note", label: "New note" },
-                                        { value: "checklist", label: "New checklist" },
+                                        { value: "note", label: "Note" },
+                                        { value: "checklist", label: "Checklist" },
+                                        { value: "kanban", label: "Kanban" },
+                                        { value: "whiteboard", label: "Whiteboard" },
+                                        { value: "legend", label: "Legend" },
+                                        { value: "website", label: "Website" },
+                                        { value: "bookmark", label: "Bookmark" },
+                                        { value: "api", label: "API data" },
+                                        { value: "portal", label: "Grid portal" },
+                                        { value: "file", label: "File" },
+                                        { value: "folder", label: "Folder" },
+                                        { value: "timbre", label: "Timbre" },
+                                        { value: "mpris", label: "Now playing" },
+                                        { value: "ai", label: "AI node" },
+                                        { value: "script", label: "Script" },
+                                        { value: "calendar", label: "Calendar" },
+                                        { value: "pomodoro", label: "Pomodoro" },
+                                        { value: "git", label: "Git repository" },
                                         { value: "none", label: "Nothing" }
                                     ]
                                     onSelected: function (value) { root.set("double_click_creates", value); }
