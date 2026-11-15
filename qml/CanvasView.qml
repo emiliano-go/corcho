@@ -150,10 +150,10 @@ Item {
 
     function finishCardLink(target) {
         var source = root.linkSourceId;
-        var double = root.linkDouble;
+        var bidirectional = root.linkDouble;
         root.cancelCardLink();
         if (!source || !target || target === source) return;
-        root.app.addCardLink(source, target, double);
+        root.app.addCardLink(source, target, bidirectional);
     }
 
     function groupCards(groupId) {
@@ -942,7 +942,9 @@ Item {
         }
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: "Double-click anywhere, or create your first card"
+            text: root.settings && (root.settings.double_click_creates || "note") === "none"
+                ? "Create your first card"
+                : "Double-click anywhere, or create your first card"
             color: root.th.muted
             font.family: root.th.fontFamily
             font.pixelSize: root.th.fontSizeBody
